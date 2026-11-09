@@ -18,7 +18,7 @@ AMAZON_TAG = os.getenv("AMAZON_TAG", "lsncardoso-20")
 MIN_DESCONTO = int(os.getenv("MIN_DESCONTO", "40"))
 URGENTE = int(os.getenv("URGENTE", "60"))
 RESUMO_HORAS = os.getenv("RESUMO_HORAS", "todas")      # "todas" ou ex.: "9,12,15,18,21"
-RESUMO_MAX = int(os.getenv("RESUMO_MAX", "25"))         # máx. de ofertas por resumo
+RESUMO_MAX = int(os.getenv("RESUMO_MAX", "0"))          # máx. de ofertas por resumo (0 = todas)
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
 TZ = ZoneInfo("America/Sao_Paulo")
 
@@ -77,7 +77,7 @@ def enviar(chat, texto):
         return False
     if not r.ok:
         log(f"Erro Telegram {chat}: {r.status_code} {r.text[:200]}")
-    time.sleep(0.05)
+    time.sleep(0.4)  # ritmo seguro para listas longas
     return True
 
 
@@ -257,16 +257,17 @@ def ciclo():
         novos_urg.sort(key=lambda a: -urg[a]["pc"])
         log(f"{len(novos_urg)} urgentes novas")
         for m in em_blocos(f"🔥 <b>{len(novos_urg)} oferta(s) com {URGENTE}%+ agora</b>",
-                           [linha(a, urg[a]) for a in novos_urg[:40]]):
+                           [linha(a, urg[a]) for a in novos_urg]):
             para_todos(m)
 
     if comuns:
         log(f"resumo: {len(novos_com)} novas comuns")
         if novos_com:
             novos_com.sort(key=lambda a: -comuns[a]["pc"])
-            extra = len(novos_com) - RESUMO_MAX
+            limite = RESUMO_MAX or len(novos_com)
+            extra = len(novos_com) - limite
             titulo = f"🛒 <b>Resumo: {len(novos_com)} oferta(s) nova(s) de {MIN_DESCONTO}% a {URGENTE - 1}%</b>"
-            linhas = [linha(a, comuns[a]) for a in novos_com[:RESUMO_MAX]]
+            linhas = [linha(a, comuns[a]) for a in novos_com[:limite]]
             if extra > 0:
                 linhas.append(f"<i>+ {extra} outras com desconto menor</i>")
             for m in em_blocos(titulo, linhas):
