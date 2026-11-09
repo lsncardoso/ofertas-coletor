@@ -19,7 +19,7 @@ concurrency:
 jobs:
   coletar:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,7 +36,7 @@ jobs:
       - name: Coletar ofertas
         env:
           COMPLETO: ${{ github.event.inputs.completo }}
-        run: python coletor.py out
+        run: python -u coletor.py out
       - name: Publicar no ramo dados
         run: |
           cd out
