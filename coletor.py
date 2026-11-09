@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import requests
 
 MIN = int(os.getenv("MIN_DESCONTO", "40"))
-URG = int(os.getenv("URGENTE", "60"))
+URG = int(os.getenv("URGENTE", "50"))
 OUT = sys.argv[1] if len(sys.argv) > 1 else "out"
 BASE = "https://www.amazon.com.br"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
