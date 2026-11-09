@@ -35,7 +35,7 @@ def api(lo, hi, dep=None, idx=0, refin=False):
            + urllib.parse.quote(json.dumps([{"id": "percentOff", "min": lo, "max": hi}])))
     if dep:
         url += "&refinementFilters=" + urllib.parse.quote(json.dumps([{"id": "departments", "value": [dep]}]))
-    time.sleep(random.uniform(0.6, 1.2))
+    time.sleep(random.uniform(0.3, 0.7))
     for tentativa in range(3):
         r = S.get(url, headers={"Accept": "application/json", "Referer": BASE + "/deals"}, timeout=30)
         if r.status_code == 200:
@@ -82,11 +82,17 @@ def faixa(lo, hi, dep):
     return itens
 
 
-def varrer(lo, hi, deps):
+def varrer(faixas, deps):
+    """Faixas pequenas de desconto evitam bater no limite de 500 (e refazer consultas)."""
     tudo = {}
     for dep in deps:
-        tudo.update(faixa(lo, hi, dep))
+        for lo, hi in faixas:
+            tudo.update(faixa(lo, hi, dep))
     return tudo
+
+
+def fatiar(lo, hi, passo):
+    return [(a, min(a + passo - 1, hi)) for a in range(lo, hi + 1, passo)]
 
 
 def salvar(nome, dados):
@@ -111,11 +117,11 @@ def main():
         deps = [o["value"] for o in dep_ref.get("options", [])]
         if not deps:
             raise Bloqueado("lista de departamentos vazia")
-        urg = varrer(URG, 100, deps)
+        urg = varrer(fatiar(URG, 69, 5) + [(70, 100)], deps)
         salvar("urgentes.json", {"gerado": agora, "itens": urg})
-        print(f"urgentes: {len(urg)}")
+        print(f"urgentes: {len(urg)}", flush=True)
         if completo:
-            com = varrer(MIN, URG - 1, deps)
+            com = varrer(fatiar(MIN, URG - 1, 4), deps)
             salvar("comuns.json", {"gerado": agora, "itens": com})
             status["comuns_gerado"] = agora
             print(f"comuns: {len(com)}")
