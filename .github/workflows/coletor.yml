@@ -1,0 +1,48 @@
+name: Coletor de ofertas
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      completo:
+        description: "Coleta completa (40%+)"
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: coletor
+  cancel-in-progress: false
+
+jobs:
+  coletar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: Dados anteriores
+        run: |
+          mkdir -p out
+          if git fetch -q origin dados --depth=1; then
+            git show FETCH_HEAD:comuns.json > out/comuns.json || rm -f out/comuns.json
+            git show FETCH_HEAD:status.json > out/status.json || rm -f out/status.json
+          fi
+      - name: Coletar ofertas
+        env:
+          COMPLETO: ${{ github.event.inputs.completo }}
+        run: python coletor.py out
+      - name: Publicar no ramo dados
+        run: |
+          cd out
+          git init -q -b dados
+          git config user.name "coletor"
+          git config user.email "coletor@users.noreply.github.com"
+          git add .
+          git commit -qm "dados $(date -u +%FT%TZ)"
+          git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" dados
