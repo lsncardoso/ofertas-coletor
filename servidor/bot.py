@@ -5,7 +5,7 @@
 - Cobre todas as ofertas da Amazon que aceitam filtro de desconto (todos os departamentos).
 - Quem manda /start no bot passa a receber; /stop para sair. Admins recebem avisos de erro e de inscritos.
 """
-import html, json, logging, os, threading, time
+import html, json, logging, os, re, threading, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -25,6 +25,7 @@ CANAL_HORAS = {int(h) for h in os.getenv("CANAL_HORAS", "9,12,15,18,21").split("
 CANAL_MAX = int(os.getenv("CANAL_MAX", "10"))
 AVISO = "\n\n<i>Link de afiliado: como Associado da Amazon, ganho com compras qualificadas.</i>"
 TZ = ZoneInfo("America/Sao_Paulo")
+WA_URL = os.getenv("WA_URL", "").strip()  # ex.: http://127.0.0.1:3399/send (ponte wa.mjs)
 
 BASE = "https://www.amazon.com.br"
 TG = f"https://api.telegram.org/bot{TOKEN}"
@@ -85,6 +86,20 @@ def enviar(chat, texto):
     return True
 
 
+def para_whatsapp(texto):
+    """Repassa ao Canal do WhatsApp (via ponte wa.mjs), convertendo HTML do Telegram."""
+    if not WA_URL:
+        return
+    t = re.sub(r'<a href="([^"]+)">(.*?)</a>', r"\2\n\1", texto)
+    for de, para in (("<b>", "*"), ("</b>", "*"), ("<s>", "~"), ("</s>", "~"), ("<i>", "_"), ("</i>", "_")):
+        t = t.replace(de, para)
+    t = html.unescape(re.sub(r"<[^>]+>", "", t))
+    try:
+        requests.post(WA_URL, json={"text": t}, timeout=5)
+    except requests.RequestException as e:
+        log(f"WhatsApp indisponivel: {e}")
+
+
 def para_admins(texto):
     for c in ADMINS:
         enviar(c, texto)
@@ -95,6 +110,8 @@ def para_todos(texto, canal=True):
     if CANAL and canal:
         if not enviar(CANAL, texto):
             log(f"Canal {CANAL} recusou a mensagem (o bot e admin do canal?)")
+    if canal:
+        para_whatsapp(texto)
     with lock:
         destinos = list(dict.fromkeys(ADMINS + ST["inscritos"]))
     for c in destinos:
@@ -296,6 +313,7 @@ def ciclo():
         for m in em_blocos(titulo, [linha(a, pend[a]) for a in top]):
             if not enviar(CANAL, m + AVISO):
                 log(f"Canal {CANAL} recusou o resumo")
+            para_whatsapp(m + AVISO)
         with lock:
             ST["canal_pend"] = {}
             ST["canal_ult"] = chave
