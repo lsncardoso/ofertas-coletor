@@ -20,6 +20,10 @@ URGENTE = int(os.getenv("URGENTE", "60"))
 RESUMO_HORAS = os.getenv("RESUMO_HORAS", "todas")      # "todas" ou ex.: "9,12,15,18,21"
 RESUMO_MAX = int(os.getenv("RESUMO_MAX", "0"))          # máx. de ofertas por resumo (0 = todas)
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
+CANAL = os.getenv("TELEGRAM_CANAL", "").strip()  # ex.: @cacadescontos40
+CANAL_HORAS = {int(h) for h in os.getenv("CANAL_HORAS", "9,12,15,18,21").split(",") if h.strip()}
+CANAL_MAX = int(os.getenv("CANAL_MAX", "10"))
+AVISO = "\n\n<i>Link de afiliado: como Associado da Amazon, ganho com compras qualificadas.</i>"
 TZ = ZoneInfo("America/Sao_Paulo")
 
 BASE = "https://www.amazon.com.br"
@@ -86,7 +90,11 @@ def para_admins(texto):
         enviar(c, texto)
 
 
-def para_todos(texto):
+def para_todos(texto, canal=True):
+    texto = texto + AVISO
+    if CANAL and canal:
+        if not enviar(CANAL, texto):
+            log(f"Canal {CANAL} recusou a mensagem (o bot e admin do canal?)")
     with lock:
         destinos = list(dict.fromkeys(ADMINS + ST["inscritos"]))
     for c in destinos:
@@ -271,7 +279,28 @@ def ciclo():
             if extra > 0:
                 linhas.append(f"<i>+ {extra} outras com desconto menor</i>")
             for m in em_blocos(titulo, linhas):
-                para_todos(m)
+                para_todos(m, canal=False)
+            with lock:
+                pend = ST.setdefault("canal_pend", {})
+                for a in novos_com:
+                    pend[a] = comuns[a]
+
+
+    # canal: resumo curto (so as melhores) nos horarios de CANAL_HORAS
+    agora = datetime.now(TZ)
+    chave = agora.strftime("%Y-%m-%d %H")
+    pend = ST.get("canal_pend") or {}
+    if CANAL and pend and agora.hour in CANAL_HORAS and ST.get("canal_ult") != chave:
+        top = sorted(pend, key=lambda a: -pend[a]["pc"])[:CANAL_MAX]
+        titulo = f"🛒 <b>Top {len(top)} ofertas de {MIN_DESCONTO}% a {URGENTE - 1}%</b>"
+        for m in em_blocos(titulo, [linha(a, pend[a]) for a in top]):
+            if not enviar(CANAL, m + AVISO):
+                log(f"Canal {CANAL} recusou o resumo")
+        with lock:
+            ST["canal_pend"] = {}
+            ST["canal_ult"] = chave
+        salvar()
+        log(f"canal: resumo com {len(top)} de {len(pend)} ofertas")
 
 
 def main():
