@@ -177,6 +177,7 @@ def para_todos_albuns(itens, titulo, canal=True):
 # sai UM post com uma colagem das melhores fotos (numeradas) + a lista numerada embaixo.
 WA_INTERVALO_MIN = int(os.getenv("WA_INTERVALO_MIN", "30"))
 WA_MAX = int(os.getenv("WA_MAX", "9"))  # produtos por post (colagem 3x3)
+WA_POSTS_MAX = int(os.getenv("WA_POSTS_MAX", "0"))  # máx. de posts por rodada (0 = todos)
 WA_FOTO_MODO = os.getenv("WA_FOTO_MODO", "previa")
 WHAPI_TOKEN = os.getenv("WHAPI_TOKEN", "").strip()  # se preenchido, posta pelo Whapi (foto grande no Canal)
 WHAPI_PARA = os.getenv("WHAPI_PARA", "").strip()    # ex.: 120363432321331568@newsletter
@@ -271,7 +272,7 @@ def whapi(tipo, payload):
 
 
 def wa_publicar(forcar=False):
-    """Se já passou o intervalo, junta as melhores pendentes num único post bonito."""
+    """Se já passou o intervalo, posta TODAS as pendentes, em posts de até WA_MAX ofertas."""
     if not (WA_URL or WHAPI_TOKEN):
         return
     pend = ST.get("wa_pend") or {}
@@ -279,66 +280,73 @@ def wa_publicar(forcar=False):
         return
     if not forcar and time.time() - ST.get("wa_ult", 0) < WA_INTERVALO_MIN * 60:
         return
-    top = sorted(pend.items(), key=lambda x: -x[1]["pc"])[:WA_MAX]
-    extra = len(pend) - len(top)
+    todas = sorted(pend.items(), key=lambda x: -x[1]["pc"])
+    partes = [todas[k:k + WA_MAX] for k in range(0, len(todas), WA_MAX)]
+    if WA_POSTS_MAX:
+        partes = partes[:WA_POSTS_MAX]
+    postadas = 0
+    for n, top in enumerate(partes):
+        if n:
+            time.sleep(8)  # respiro entre um post e outro
+        rotulo = f" ({n + 1}/{len(partes)})" if len(partes) > 1 else ""
+        extra = len(todas) - postadas - len(top) if n == len(partes) - 1 else 0
+        if not wa_post(top, rotulo, extra, ultimo=(n == len(partes) - 1)):
+            break
+        postadas += len(top)
+    with lock:
+        ST["wa_ult_top"] = dict(todas[:postadas] or todas[:WA_MAX])
+        ST["wa_pend"] = {}
+        ST["wa_ult"] = time.time()
+    salvar()
+    log(f"WhatsApp: {postadas} de {len(todas)} ofertas em {len(partes)} post(s)")
+
+
+def wa_post(top, rotulo="", extra=0, ultimo=True):
+    """Um post do WhatsApp com até WA_MAX ofertas. Devolve True se saiu."""
+    aviso = AVISO_WA if ultimo else ""
     corpo = "\n\n".join(wa_item(i, a, it) for i, (a, it) in enumerate(top))
-    texto = (f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*\n"
+    texto = (f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*{rotulo}\n"
              f"━━━━━━━━━━━━━━\n\n{corpo}\n\n━━━━━━━━━━━━━━")
     if extra > 0:
         texto += f"\n➕ _e mais {extra} ofertas com desconto menor_"
-    texto += AVISO_WA
+    texto += aviso
     if WHAPI_TOKEN and WHAPI_PARA and WHAPI_ESTILO == "individual":
         # cabeçalho, depois cada oferta = foto grande com o texto embaixo
         whapi("text", {"to": WHAPI_PARA, "typing_time": 0,
-                       "body": f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*\n━━━━━━━━━━━━━━\n"
+                       "body": f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*{rotulo}\n━━━━━━━━━━━━━━\n"
                                f"Até *{top[0][1]['pc']}% OFF* na Amazon 👇"})
         oks = 0
         for i, (a, it) in enumerate(top):
             time.sleep(4)
-            leg = wa_item(i, a, it) + (AVISO_WA if i == len(top) - 1 else "")
+            leg = wa_item(i, a, it) + (aviso if i == len(top) - 1 else "")
             ok = it.get("img") and whapi("image", {"to": WHAPI_PARA, "media": foto_url(it), "caption": leg})
             if not ok:
                 ok = whapi("text", {"to": WHAPI_PARA, "body": leg, "typing_time": 0})
             oks += bool(ok)
-        log(f"WhatsApp (Whapi individual): {oks}/{len(top)} ofertas postadas")
-        with lock:
-            ST["wa_ult_top"] = dict(top)
-            ST["wa_pend"] = {}
-            ST["wa_ult"] = time.time()
-        salvar()
-        return
+        log(f"WhatsApp (Whapi individual){rotulo}: {oks}/{len(top)} ofertas")
+        return oks > 0
     colagem = montar_colagem(top) if FOTOS else None
     if WHAPI_TOKEN and WHAPI_PARA:
-        if colagem and WHAPI_ESTILO == "unica":
-            # UMA mensagem: colagem grande em cima, lista numerada com links como legenda
+        b64 = None
+        if colagem:
             with open(colagem, "rb") as f:
                 b64 = base64.b64encode(f.read()).decode()
+        if b64 and WHAPI_ESTILO == "unica":
+            # UMA mensagem: colagem grande em cima, lista numerada com links como legenda
             ok = whapi("image", {"to": WHAPI_PARA, "caption": texto,
                                  "media": f"data:image/jpeg;name=ofertas.jpg;base64,{b64}"})
             if not ok:  # legenda recusada: manda a lista em texto logo depois
                 ok = whapi("text", {"to": WHAPI_PARA, "body": texto, "typing_time": 0})
-            log(f"WhatsApp (Whapi única): post com {len(top)} ofertas ok={ok}")
-            with lock:
-                ST["wa_ult_top"] = dict(top)
-                ST["wa_pend"] = {}
-                ST["wa_ult"] = time.time()
-            salvar()
-            return
+            log(f"WhatsApp (Whapi única){rotulo}: {len(top)} ofertas ok={ok}")
+            return ok
         # 1) foto grande da colagem  2) logo depois, a lista com os links
-        if colagem:
-            with open(colagem, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
+        if b64:
             whapi("image", {"to": WHAPI_PARA, "media": f"data:image/jpeg;name=ofertas.jpg;base64,{b64}",
-                            "caption": f"🔥 *{len(top)} ofertas com até {top[0][1]['pc']}% OFF* 👇"})
+                            "caption": f"🔥 *{len(top)} ofertas com até {top[0][1]['pc']}% OFF*{rotulo} 👇"})
             time.sleep(3)
         ok = whapi("text", {"to": WHAPI_PARA, "body": texto, "typing_time": 0})
-        log(f"WhatsApp (Whapi): post com {len(top)} ofertas ({'com' if colagem else 'sem'} foto) ok={ok}")
-        with lock:
-            ST["wa_ult_top"] = dict(top)
-            ST["wa_pend"] = {}
-            ST["wa_ult"] = time.time()
-        salvar()
-        return
+        log(f"WhatsApp (Whapi){rotulo}: {len(top)} ofertas ({'com' if b64 else 'sem'} foto) ok={ok}")
+        return ok
     if colagem and WA_FOTO_MODO == "imagem":
         payload = {"image": colagem, "caption": texto}
     elif colagem and WA_FOTO_MODO == "previa":
@@ -350,15 +358,11 @@ def wa_publicar(forcar=False):
         payload = {"text": texto}
     try:
         requests.post(WA_URL, json=payload, timeout=10)
-        log(f"WhatsApp: post com {len(top)} ofertas ({'com' if colagem else 'sem'} colagem)")
+        log(f"WhatsApp (ponte){rotulo}: {len(top)} ofertas ({'com' if colagem else 'sem'} colagem)")
+        return True
     except requests.RequestException as e:
         log(f"Ponte WhatsApp indisponível: {e}")
-        return
-    with lock:
-        ST["wa_ult_top"] = dict(top)
-        ST["wa_pend"] = {}
-        ST["wa_ult"] = time.time()
-    salvar()
+        return False
 
 
 def para_admins(texto):
