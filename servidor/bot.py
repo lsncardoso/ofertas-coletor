@@ -98,7 +98,7 @@ def visivel(t):
 
 def linha_curta(n, asin, it):
     de = f"<s>{brl(it['d'])}</s> → " if it["d"] else ""
-    rel = "⚡" if it["rel"] else ""
+    rel = ("⚡" if it["rel"] else "") + ("🏆" if it.get("min30") else "") + ("📉" if it.get("baixou") else "")
     return (f"<b>{n}.</b> <b>{it['pc']}%</b>{rel} {de}<b>{brl(it['p'])}</b>\n"
             f"<a href=\"{BASE}/dp/{asin}?tag={AMAZON_TAG}\">{html.escape(it['t'][:55])}</a>")
 
@@ -252,9 +252,14 @@ def curto(t, n):
 def wa_item(n, asin, it):
     de = f"~{brl(it['d'])}~ ➜ " if it["d"] else ""
     rel = " ⚡ _relâmpago_" if it["rel"] else ""
+    selo = ""
+    if it.get("baixou"):
+        selo += f"📉 _baixou de novo (era {brl(it['baixou'])})_\n"
+    if it.get("min30"):
+        selo += "🏆 _menor preço em 30 dias_\n"
     return (f"{NUM[n]} *{it['pc']}% OFF*{rel}\n"
             f"{curto(it['t'], 70)}\n"
-            f"{de}*{brl(it['p'])}*\n"
+            f"{de}*{brl(it['p'])}*\n{selo}"
             f"🛒 {BASE}/dp/{asin}?tag={AMAZON_TAG}")
 
 
@@ -294,6 +299,12 @@ def wa_publicar(forcar=False):
             break
         postadas += len(top)
     with lock:
+        dia = datetime.now(TZ).strftime("%Y-%m-%d")
+        h = ST.get("hoje") or {}
+        if h.get("d") != dia:
+            h = {"d": dia, "itens": {}}
+        h["itens"].update(dict(todas[:postadas]))
+        ST["hoje"] = h
         ST["wa_ult_top"] = dict(todas[:postadas] or todas[:WA_MAX])
         ST["wa_pend"] = {}
         ST["wa_ult"] = time.time()
@@ -301,11 +312,12 @@ def wa_publicar(forcar=False):
     log(f"WhatsApp: {postadas} de {len(todas)} ofertas em {len(partes)} post(s)")
 
 
-def wa_post(top, rotulo="", extra=0, ultimo=True):
+def wa_post(top, rotulo="", extra=0, ultimo=True, titulo=None, sub=""):
     """Um post do WhatsApp com até WA_MAX ofertas. Devolve True se saiu."""
     aviso = AVISO_WA if ultimo else ""
     corpo = "\n\n".join(wa_item(i, a, it) for i, (a, it) in enumerate(top))
-    texto = (f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*{rotulo}\n"
+    cab = (titulo or f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*") + rotulo + (f"\n_{sub}_" if sub else "")
+    texto = (f"{cab}\n"
              f"━━━━━━━━━━━━━━\n\n{corpo}\n\n━━━━━━━━━━━━━━")
     if extra > 0:
         texto += f"\n➕ _e mais {extra} ofertas com desconto menor_"
@@ -313,7 +325,7 @@ def wa_post(top, rotulo="", extra=0, ultimo=True):
     if WHAPI_TOKEN and WHAPI_PARA and WHAPI_ESTILO == "individual":
         # cabeçalho, depois cada oferta = foto grande com o texto embaixo
         whapi("text", {"to": WHAPI_PARA, "typing_time": 0,
-                       "body": f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*{rotulo}\n━━━━━━━━━━━━━━\n"
+                       "body": f"{cab}\n━━━━━━━━━━━━━━\n"
                                f"Até *{top[0][1]['pc']}% OFF* na Amazon 👇"})
         oks = 0
         for i, (a, it) in enumerate(top):
@@ -460,6 +472,10 @@ def ouvir_telegram():
                         ST.setdefault("wa_pend", {}).update(ult)
                     threading.Thread(target=wa_publicar, kwargs={"forcar": True}, daemon=True).start()
                     enviar(chat, "🧪 Repostando o último post no WhatsApp…")
+            elif txt.startswith(("/testetop", "/testeachados")) and chat in ADMINS:
+                qual = "top" if txt.startswith("/testetop") else "achados"
+                threading.Thread(target=wa_tematicos, kwargs={"forcar": qual}, daemon=True).start()
+                enviar(chat, f"🧪 Postando o {'Top 5 do dia' if qual == 'top' else 'Achadinhos'} no WhatsApp…")
             elif txt.startswith("/status") and chat in ADMINS:
                 enviar(chat, f"🤖 Online. Inscritos: {len(ST['inscritos'])} · "
                              f"produtos conhecidos: {len(ST['vistos'])} · "
@@ -491,9 +507,128 @@ def brl(v):
 
 def linha(asin, it):
     de = f"<s>{brl(it['d'])}</s> → " if it["d"] else ""
-    rel = " ⚡" if it["rel"] else ""
+    rel = (" ⚡" if it["rel"] else "") + (" 🏆 menor preço em 30 dias" if it.get("min30") else "") \
+        + (f" 📉 baixou de novo (era {brl(it['baixou'])})" if it.get("baixou") else "")
     return (f"<b>{it['pc']}%</b>{rel} · {de}<b>{brl(it['p'])}</b>\n"
             f"<a href=\"{BASE}/dp/{asin}?tag={AMAZON_TAG}\">{html.escape(it['t'][:100])}</a>")
+
+
+# ---------- qualidade: histórico de preços, sem repetição, sem "maquiagem" ----------
+PRECOS_FILE = os.getenv("PRECOS_FILE", "precos.json")
+REPETIR_DIAS = int(os.getenv("REPETIR_DIAS", "7"))       # não repete o produto antes disso...
+QUEDA_MIN = float(os.getenv("QUEDA_MIN", "5"))            # ...a não ser que o preço caia essa % ou mais
+HIST_DIAS_MIN = int(os.getenv("HIST_DIAS_MIN", "7"))      # dias de histórico p/ o selo "menor preço"
+
+
+def _carregar_precos():
+    try:
+        with open(PRECOS_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+PRECOS = _carregar_precos()  # asin -> {"i": 1º dia visto, "h": {dia: menor preço do dia}}
+
+
+def hoje():
+    return (datetime.now(TZ).date() - datetime(1970, 1, 1).date()).days
+
+
+def registrar_precos(itens):
+    dia = hoje()
+    d = str(dia)
+    for a, it in itens.items():
+        r = PRECOS.setdefault(a, {"i": dia, "h": {}})
+        p = float(it["p"])
+        if d not in r["h"] or p < r["h"][d]:
+            r["h"][d] = p
+
+
+def salvar_precos():
+    corte = hoje() - 31
+    for a in list(PRECOS):
+        h = {k: v for k, v in PRECOS[a]["h"].items() if int(k) >= corte}
+        if h:
+            PRECOS[a]["h"] = h
+        else:
+            del PRECOS[a]
+    al = ST.get("alertas") or {}
+    for a in [a for a, (p, t) in al.items() if time.time() - t > 60 * 86400]:
+        del al[a]
+    tmp = PRECOS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(PRECOS, f, separators=(",", ":"))
+    os.replace(tmp, PRECOS_FILE)
+
+
+def avaliar(a, it):
+    """Põe o selo de menor preço e devolve False se for 'maquiagem'
+    (o produto esteve bem mais barato nos últimos 30 dias)."""
+    p = float(it["p"])
+    r = PRECOS.get(a)
+    dia = hoje()
+    vals = [v for k, v in (r or {}).get("h", {}).items() if dia - 30 <= int(k) < dia]
+    it.pop("min30", None)
+    if not vals:
+        return True
+    m = min(vals)
+    if m < p * (1 - QUEDA_MIN / 100):
+        return False
+    if dia - r["i"] >= HIST_DIAS_MIN and p <= m:
+        it["min30"] = True
+    return True
+
+
+def pode_avisar(a, it, urgente):
+    """Não repete produto antes de REPETIR_DIAS, salvo se o preço cair QUEDA_MIN% ou mais."""
+    al = ST.setdefault("alertas", {})
+    p = float(it["p"])
+    if a not in al:
+        ja = ST["vistos"].get(a, 0) >= URGENTE if urgente else a in ST["vistos"]
+        if ja:  # já tinha sido avisado antes deste controle existir: só registra
+            al[a] = [p, time.time()]
+            return False
+        return True
+    p0, t0 = al[a]
+    if p <= p0 * (1 - QUEDA_MIN / 100):
+        it["baixou"] = p0
+        return True
+    return time.time() - t0 >= REPETIR_DIAS * 86400
+
+
+# ---------- posts temáticos no WhatsApp ----------
+WA_TOP_HORA = int(os.getenv("WA_TOP_HORA", "20"))           # Top 5 do dia (-1 desliga)
+WA_ACHADOS_HORA = int(os.getenv("WA_ACHADOS_HORA", "12"))   # Achadinhos baratos (-1 desliga)
+WA_ACHADOS_ATE = float(os.getenv("WA_ACHADOS_ATE", "50"))
+WA_ACHADOS_MIN = float(os.getenv("WA_ACHADOS_MIN", "10"))
+
+
+def wa_tematicos(forcar=None):
+    if not (WA_URL or WHAPI_TOKEN):
+        return
+    agora = datetime.now(TZ)
+    dia = agora.strftime("%Y-%m-%d")
+    if forcar == "top" or (forcar is None and agora.hour == WA_TOP_HORA and ST.get("top_dia_ult") != dia):
+        ST["top_dia_ult"] = dia
+        h = ST.get("hoje") or {}
+        itens = h.get("itens", {}) if h.get("d") == dia else {}
+        top = sorted(itens.items(), key=lambda x: -x[1]["pc"])[:5]
+        if top:
+            wa_post(top, titulo="🏆 *TOP 5 DO DIA*", sub="Os maiores descontos que passaram por aqui hoje")
+            log(f"WhatsApp: Top 5 do dia ({len(top)})")
+        salvar()
+    if forcar == "achados" or (forcar is None and agora.hour == WA_ACHADOS_HORA and ST.get("achados_ult") != dia):
+        ST["achados_ult"] = dia
+        todos = {**(baixar("comuns.json") or {}).get("itens", {}), **(baixar("urgentes.json") or {}).get("itens", {})}
+        cand = [(a, it) for a, it in todos.items()
+                if WA_ACHADOS_MIN <= float(it["p"]) <= WA_ACHADOS_ATE and it["pc"] >= MIN_DESCONTO and avaliar(a, it)]
+        top = sorted(cand, key=lambda x: -x[1]["pc"])[:WA_MAX]
+        if top:
+            wa_post(top, titulo=f"💸 *ACHADINHOS ATÉ R$ {WA_ACHADOS_ATE:.0f}*",
+                    sub="Baratinhos com desconto de verdade")
+            log(f"WhatsApp: Achadinhos ({len(top)} de {len(cand)})")
+        salvar()
 
 
 # ---------- ciclo principal ----------
@@ -540,9 +675,16 @@ def ciclo():
         comuns = (baixar("comuns.json") or {}).get("itens", {})
         ST["ult_comuns"] = cg
 
-    novos_urg = [a for a, it in urg.items() if it["pc"] >= URGENTE and ST["vistos"].get(a, 0) < URGENTE]
-    novos_com = [a for a, it in comuns.items() if a not in ST["vistos"] and a not in urg
-                 and MIN_DESCONTO <= it["pc"] < URGENTE]
+    novos_urg = [a for a, it in urg.items() if it["pc"] >= URGENTE and pode_avisar(a, it, True)]
+    novos_com = [a for a, it in comuns.items() if a not in urg and MIN_DESCONTO <= it["pc"] < URGENTE
+                 and pode_avisar(a, it, False)]
+    maquiadas = {a for a in novos_urg if not avaliar(a, urg[a])} | {a for a in novos_com if not avaliar(a, comuns[a])}
+    if maquiadas:
+        log(f"{len(maquiadas)} oferta(s) ignoradas: já estiveram mais baratas nos últimos 30 dias")
+    novos_urg = [a for a in novos_urg if a not in maquiadas]
+    novos_com = [a for a in novos_com if a not in maquiadas]
+    registrar_precos({**comuns, **urg})
+    salvar_precos()
     with lock:
         for a, it in {**comuns, **urg}.items():
             ST["vistos"][a] = max(ST["vistos"].get(a, 0), it["pc"])
@@ -555,6 +697,13 @@ def ciclo():
                         f"e {len(comuns)} entre {MIN_DESCONTO}% e {URGENTE - 1}%. "
                         "A partir de agora aviso só as novas.")
         return
+
+    with lock:
+        al = ST.setdefault("alertas", {})
+        for a in novos_urg:
+            al[a] = [float(urg[a]["p"]), time.time()]
+        for a in novos_com:
+            al[a] = [float(comuns[a]["p"]), time.time()]
 
     if novos_urg:
         novos_urg.sort(key=lambda a: -urg[a]["pc"])
@@ -619,6 +768,7 @@ def main():
         try:
             ciclo()
             wa_publicar()
+            wa_tematicos()
             erro_avisado = False
         except Exception as e:
             log(f"Falha no ciclo: {e!r}")
