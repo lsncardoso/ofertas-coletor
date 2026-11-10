@@ -264,7 +264,7 @@ def wa_publicar(forcar=False):
     texto = (f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*\n"
              f"━━━━━━━━━━━━━━\n\n{corpo}\n\n━━━━━━━━━━━━━━")
     if extra > 0:
-        texto += f"\n➕ _mais {extra} ofertas no bot do Telegram_"
+        texto += f"\n➕ _e mais {extra} ofertas com desconto menor_"
     texto += AVISO_WA
     colagem = montar_colagem(top) if FOTOS else None
     try:
