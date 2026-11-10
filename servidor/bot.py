@@ -180,7 +180,7 @@ WA_MAX = int(os.getenv("WA_MAX", "9"))  # produtos por post (colagem 3x3)
 WA_FOTO_MODO = os.getenv("WA_FOTO_MODO", "previa")
 WHAPI_TOKEN = os.getenv("WHAPI_TOKEN", "").strip()  # se preenchido, posta pelo Whapi (foto grande no Canal)
 WHAPI_PARA = os.getenv("WHAPI_PARA", "").strip()    # ex.: 120363432321331568@newsletter
-WHAPI_ESTILO = os.getenv("WHAPI_ESTILO", "individual")  # "individual" (foto+texto por oferta) ou "colagem"
+WHAPI_ESTILO = os.getenv("WHAPI_ESTILO", "unica")  # "unica" (colagem + lista numa mensagem), "individual" ou "colagem"
 NUM = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
 
 
@@ -309,6 +309,21 @@ def wa_publicar(forcar=False):
         return
     colagem = montar_colagem(top) if FOTOS else None
     if WHAPI_TOKEN and WHAPI_PARA:
+        if colagem and WHAPI_ESTILO == "unica":
+            # UMA mensagem: colagem grande em cima, lista numerada com links como legenda
+            with open(colagem, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            ok = whapi("image", {"to": WHAPI_PARA, "caption": texto,
+                                 "media": f"data:image/jpeg;name=ofertas.jpg;base64,{b64}"})
+            if not ok:  # legenda recusada: manda a lista em texto logo depois
+                ok = whapi("text", {"to": WHAPI_PARA, "body": texto, "typing_time": 0})
+            log(f"WhatsApp (Whapi única): post com {len(top)} ofertas ok={ok}")
+            with lock:
+                ST["wa_ult_top"] = dict(top)
+                ST["wa_pend"] = {}
+                ST["wa_ult"] = time.time()
+            salvar()
+            return
         # 1) foto grande da colagem  2) logo depois, a lista com os links
         if colagem:
             with open(colagem, "rb") as f:
