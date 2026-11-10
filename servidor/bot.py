@@ -177,6 +177,7 @@ def para_todos_albuns(itens, titulo, canal=True):
 # sai UM post com uma colagem das melhores fotos (numeradas) + a lista numerada embaixo.
 WA_INTERVALO_MIN = int(os.getenv("WA_INTERVALO_MIN", "30"))
 WA_MAX = int(os.getenv("WA_MAX", "9"))  # produtos por post (colagem 3x3)
+WA_FOTO_MODO = os.getenv("WA_FOTO_MODO", "previa")  # previa (colagem como prévia do texto) | imagem | texto
 NUM = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
 
 
@@ -233,6 +234,10 @@ def montar_colagem(itens):
         return None
     caminho = os.path.abspath("wa_colagem.jpg")
     tela.save(caminho, "JPEG", quality=85)
+    # miniatura leve: vai como "prévia" de uma mensagem de texto (o canal recusa imagem pura)
+    mini = tela.copy()
+    mini.thumbnail((480, 480))
+    mini.save(os.path.abspath("wa_mini.jpg"), "JPEG", quality=70)
     return caminho
 
 
@@ -267,9 +272,17 @@ def wa_publicar(forcar=False):
         texto += f"\n➕ _e mais {extra} ofertas com desconto menor_"
     texto += AVISO_WA
     colagem = montar_colagem(top) if FOTOS else None
+    if colagem and WA_FOTO_MODO == "imagem":
+        payload = {"image": colagem, "caption": texto}
+    elif colagem and WA_FOTO_MODO == "previa":
+        link = f"{BASE}/dp/{top[0][0]}?tag={AMAZON_TAG}"
+        payload = {"text": texto, "thumb": os.path.abspath("wa_mini.jpg"), "link": link,
+                   "title": f"🔥 {len(top)} ofertas com até {top[0][1]['pc']}% OFF",
+                   "desc": "Caça-Descontos • Amazon"}
+    else:
+        payload = {"text": texto}
     try:
-        requests.post(WA_URL, json={"image": colagem, "caption": texto} if colagem else {"text": texto},
-                      timeout=10)
+        requests.post(WA_URL, json=payload, timeout=10)
         log(f"WhatsApp: post com {len(top)} ofertas ({'com' if colagem else 'sem'} colagem)")
     except requests.RequestException as e:
         log(f"Ponte WhatsApp indisponível: {e}")
