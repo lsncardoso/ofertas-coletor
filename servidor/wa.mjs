@@ -1,5 +1,5 @@
 // Ponte WhatsApp para o bot de ofertas (roda 24h no servidor).
-// Recebe textos do bot.py em http://127.0.0.1:3399/send e publica no Canal do WhatsApp.
+// Recebe do bot.py em http://127.0.0.1:3399/send ({text} ou {image, caption}) e publica no Canal do WhatsApp.
 // Config (.env): WA_PHONE (so na 1a conexao, p/ codigo de pareamento), WA_CANAL_LINK
 import makeWASocket, { useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion } from "baileys";
 import pino from "pino";
@@ -31,13 +31,23 @@ async function processarFila() {
   enviando = true;
   try {
     while (fila.length && pronto) {
-      const texto = fila[0];
+      const item = fila[0];
       try {
         const jid = await resolverCanal();
         if (!jid) { log("Sem WA_CANAL_LINK configurado; descartando"); fila.shift(); continue; }
-        await sock.sendMessage(jid, { text: texto });
+        if (item.image) {
+          try {
+            await sock.sendMessage(jid, { image: { url: item.image }, caption: item.caption || "" });
+            log("Postado no canal com foto. Na fila:", fila.length - 1);
+          } catch (e) {
+            log("Foto falhou (" + (e?.message || e) + "), mandando so o texto");
+            await sock.sendMessage(jid, { text: item.caption || "" });
+          }
+        } else {
+          await sock.sendMessage(jid, { text: item.text });
+          log("Postado no canal (" + item.text.length + " caracteres). Na fila:", fila.length - 1);
+        }
         fila.shift();
-        log("Postado no canal (" + texto.length + " caracteres). Na fila:", fila.length);
       } catch (e) {
         log("Falha ao postar:", e?.message || e);
         break; // tenta de novo no proximo ciclo
@@ -100,8 +110,9 @@ http.createServer((req, res) => {
     req.on("data", c => { body += c; if (body.length > 100000) req.destroy(); });
     req.on("end", () => {
       try {
-        const { text } = JSON.parse(body);
-        if (text) { fila.push(text); if (fila.length > 200) fila.shift(); processarFila(); }
+        const { text, image, caption } = JSON.parse(body);
+        const item = image ? { image, caption } : (text ? { text } : null);
+        if (item) { fila.push(item); if (fila.length > 200) fila.shift(); processarFila(); }
         res.end('{"ok":true}');
       } catch { res.statusCode = 400; res.end('{"ok":false}'); }
     });
