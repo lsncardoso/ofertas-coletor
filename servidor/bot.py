@@ -180,6 +180,7 @@ WA_MAX = int(os.getenv("WA_MAX", "9"))  # produtos por post (colagem 3x3)
 WA_FOTO_MODO = os.getenv("WA_FOTO_MODO", "previa")
 WHAPI_TOKEN = os.getenv("WHAPI_TOKEN", "").strip()  # se preenchido, posta pelo Whapi (foto grande no Canal)
 WHAPI_PARA = os.getenv("WHAPI_PARA", "").strip()    # ex.: 120363432321331568@newsletter
+WHAPI_ESTILO = os.getenv("WHAPI_ESTILO", "individual")  # "individual" (foto+texto por oferta) ou "colagem"
 NUM = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
 
 
@@ -286,6 +287,26 @@ def wa_publicar(forcar=False):
     if extra > 0:
         texto += f"\n➕ _e mais {extra} ofertas com desconto menor_"
     texto += AVISO_WA
+    if WHAPI_TOKEN and WHAPI_PARA and WHAPI_ESTILO == "individual":
+        # cabeçalho, depois cada oferta = foto grande com o texto embaixo
+        whapi("text", {"to": WHAPI_PARA, "typing_time": 0,
+                       "body": f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*\n━━━━━━━━━━━━━━\n"
+                               f"Até *{top[0][1]['pc']}% OFF* na Amazon 👇"})
+        oks = 0
+        for i, (a, it) in enumerate(top):
+            time.sleep(4)
+            leg = wa_item(i, a, it) + (AVISO_WA if i == len(top) - 1 else "")
+            ok = it.get("img") and whapi("image", {"to": WHAPI_PARA, "media": foto_url(it), "caption": leg})
+            if not ok:
+                ok = whapi("text", {"to": WHAPI_PARA, "body": leg, "typing_time": 0})
+            oks += bool(ok)
+        log(f"WhatsApp (Whapi individual): {oks}/{len(top)} ofertas postadas")
+        with lock:
+            ST["wa_ult_top"] = dict(top)
+            ST["wa_pend"] = {}
+            ST["wa_ult"] = time.time()
+        salvar()
+        return
     colagem = montar_colagem(top) if FOTOS else None
     if WHAPI_TOKEN and WHAPI_PARA:
         # 1) foto grande da colagem  2) logo depois, a lista com os links
