@@ -35,7 +35,14 @@ async function processarFila() {
       try {
         const jid = await resolverCanal();
         if (!jid) { log("Sem WA_CANAL_LINK configurado; descartando"); fila.shift(); continue; }
-        if (item.image) {
+        if (item.thumb) {
+          // texto com "prévia" (miniatura da colagem): o Canal aceita texto, mas recusa imagem pura
+          const linkPreview = { "canonical-url": item.link, "matched-text": item.link,
+                                title: item.title || "Ofertas", description: item.desc || "",
+                                jpegThumbnail: fs.readFileSync(item.thumb) };
+          await sock.sendMessage(jid, { text: item.text, linkPreview });
+          log("Postado no canal (texto + previa). Na fila:", fila.length - 1);
+        } else if (item.image) {
           try {
             await sock.sendMessage(jid, { image: { url: item.image }, caption: item.caption || "" });
             log("Postado no canal com foto. Na fila:", fila.length - 1);
@@ -110,8 +117,9 @@ http.createServer((req, res) => {
     req.on("data", c => { body += c; if (body.length > 100000) req.destroy(); });
     req.on("end", () => {
       try {
-        const { text, image, caption } = JSON.parse(body);
-        const item = image ? { image, caption } : (text ? { text } : null);
+        const { text, image, caption, thumb, link, title, desc } = JSON.parse(body);
+        const item = thumb && text ? { text, thumb, link, title, desc }
+                   : image ? { image, caption } : (text ? { text } : null);
         if (item) { fila.push(item); if (fila.length > 200) fila.shift(); processarFila(); }
         res.end('{"ok":true}');
       } catch { res.statusCode = 400; res.end('{"ok":false}'); }
