@@ -59,7 +59,9 @@ def item(p):
         pc = round((1 - float(pr) / float(de)) * 100)
     if pc is None or not pr:
         return None
-    return {"t": p.get("title", "")[:120], "p": pr, "d": de, "pc": pc,
+    img = p.get("image") or {}
+    foto = (img.get("hiRes") or {}).get("physicalId") or (img.get("lowRes") or {}).get("physicalId") or img.get("physicalId")
+    return {"t": p.get("title", "")[:120], "p": pr, "d": de, "pc": pc, "img": foto,
             "rel": (p.get("dealDetails") or {}).get("type") == "LIGHTNING_DEAL"}
 
 
