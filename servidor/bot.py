@@ -5,7 +5,7 @@
 - Cobre todas as ofertas da Amazon que aceitam filtro de desconto (todos os departamentos).
 - Quem manda /start no bot passa a receber; /stop para sair. Admins recebem avisos de erro e de inscritos.
 """
-import html, json, logging, os, re, threading, time
+import base64, html, json, logging, os, re, threading, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -177,13 +177,15 @@ def para_todos_albuns(itens, titulo, canal=True):
 # sai UM post com uma colagem das melhores fotos (numeradas) + a lista numerada embaixo.
 WA_INTERVALO_MIN = int(os.getenv("WA_INTERVALO_MIN", "30"))
 WA_MAX = int(os.getenv("WA_MAX", "9"))  # produtos por post (colagem 3x3)
-WA_FOTO_MODO = os.getenv("WA_FOTO_MODO", "previa")  # previa (colagem como prévia do texto) | imagem | texto
+WA_FOTO_MODO = os.getenv("WA_FOTO_MODO", "previa")
+WHAPI_TOKEN = os.getenv("WHAPI_TOKEN", "").strip()  # se preenchido, posta pelo Whapi (foto grande no Canal)
+WHAPI_PARA = os.getenv("WHAPI_PARA", "").strip()    # ex.: 120363432321331568@newsletter
 NUM = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
 
 
 def para_whatsapp(itens, titulo=None):
     """Guarda as ofertas para o próximo post do WhatsApp (não posta na hora)."""
-    if not WA_URL:
+    if not (WA_URL or WHAPI_TOKEN):
         return
     with lock:
         pend = ST.setdefault("wa_pend", {})
@@ -254,9 +256,22 @@ def wa_item(n, asin, it):
             f"🛒 {BASE}/dp/{asin}?tag={AMAZON_TAG}")
 
 
+def whapi(tipo, payload):
+    try:
+        r = requests.post(f"https://gate.whapi.cloud/messages/{tipo}", json=payload, timeout=90,
+                          headers={"Authorization": f"Bearer {WHAPI_TOKEN}", "Accept": "application/json"})
+    except requests.RequestException as e:
+        log(f"Whapi indisponível: {e}")
+        return False
+    if not r.ok:
+        log(f"Whapi {tipo} falhou ({r.status_code}): {r.text[:200]}")
+        para_admins(f"⚠️ Whapi recusou o post ({r.status_code}): {html.escape(r.text[:150])}")
+    return r.ok
+
+
 def wa_publicar(forcar=False):
     """Se já passou o intervalo, junta as melhores pendentes num único post bonito."""
-    if not WA_URL:
+    if not (WA_URL or WHAPI_TOKEN):
         return
     pend = ST.get("wa_pend") or {}
     if not pend:
@@ -272,6 +287,22 @@ def wa_publicar(forcar=False):
         texto += f"\n➕ _e mais {extra} ofertas com desconto menor_"
     texto += AVISO_WA
     colagem = montar_colagem(top) if FOTOS else None
+    if WHAPI_TOKEN and WHAPI_PARA:
+        # 1) foto grande da colagem  2) logo depois, a lista com os links
+        if colagem:
+            with open(colagem, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            whapi("image", {"to": WHAPI_PARA, "media": f"data:image/jpeg;name=ofertas.jpg;base64,{b64}",
+                            "caption": f"🔥 *{len(top)} ofertas com até {top[0][1]['pc']}% OFF* 👇"})
+            time.sleep(3)
+        ok = whapi("text", {"to": WHAPI_PARA, "body": texto, "typing_time": 0})
+        log(f"WhatsApp (Whapi): post com {len(top)} ofertas ({'com' if colagem else 'sem'} foto) ok={ok}")
+        with lock:
+            ST["wa_ult_top"] = dict(top)
+            ST["wa_pend"] = {}
+            ST["wa_ult"] = time.time()
+        salvar()
+        return
     if colagem and WA_FOTO_MODO == "imagem":
         payload = {"image": colagem, "caption": texto}
     elif colagem and WA_FOTO_MODO == "previa":
@@ -288,6 +319,7 @@ def wa_publicar(forcar=False):
         log(f"Ponte WhatsApp indisponível: {e}")
         return
     with lock:
+        ST["wa_ult_top"] = dict(top)
         ST["wa_pend"] = {}
         ST["wa_ult"] = time.time()
     salvar()
@@ -373,6 +405,21 @@ def ouvir_telegram():
                 enviar(chat, "Você não vai mais receber as ofertas. Para voltar, mande /start.")
                 if saiu:
                     para_admins(f"👋 Saiu: {html.escape(nome)} — total: {len(ST['inscritos'])}")
+            elif txt.startswith("/testewa") and chat in ADMINS:
+                ult = ST.get("wa_ult_top") or {}
+                if not ult:  # ainda sem post: usa as melhores ofertas atuais
+                    try:
+                        urg = (baixar("urgentes.json") or {}).get("itens", {})
+                        ult = dict(sorted(urg.items(), key=lambda x: -x[1]["pc"])[:WA_MAX])
+                    except Exception as e:
+                        log(f"testewa: {e}")
+                if not ult:
+                    enviar(chat, "Não achei ofertas para o teste agora.")
+                else:
+                    with lock:
+                        ST.setdefault("wa_pend", {}).update(ult)
+                    threading.Thread(target=wa_publicar, kwargs={"forcar": True}, daemon=True).start()
+                    enviar(chat, "🧪 Repostando o último post no WhatsApp…")
             elif txt.startswith("/status") and chat in ADMINS:
                 enviar(chat, f"🤖 Online. Inscritos: {len(ST['inscritos'])} · "
                              f"produtos conhecidos: {len(ST['vistos'])} · "
@@ -503,7 +550,7 @@ def ciclo():
     agora = datetime.now(TZ)
     chave = agora.strftime("%Y-%m-%d %H")
     pend = ST.get("canal_pend") or {}
-    if (CANAL or WA_URL) and pend and agora.hour in CANAL_HORAS and ST.get("canal_ult") != chave:
+    if (CANAL or WA_URL or WHAPI_TOKEN) and pend and agora.hour in CANAL_HORAS and ST.get("canal_ult") != chave:
         top = sorted(pend, key=lambda a: -pend[a]["pc"])[:CANAL_MAX]
         titulo = f"🛒 <b>Top {len(top)} ofertas de {MIN_DESCONTO}% a {URGENTE - 1}%</b>"
         com = [(a, pend[a]) for a in top if pend[a].get("img")]
