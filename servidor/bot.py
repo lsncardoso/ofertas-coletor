@@ -5,7 +5,7 @@
 - Cobre todas as ofertas da Amazon que aceitam filtro de desconto (todos os departamentos).
 - Quem manda /start no bot passa a receber; /stop para sair. Admins recebem avisos de erro e de inscritos.
 """
-import html, json, logging, os, re, threading, time
+import html, json, logging, os, threading, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -19,13 +19,9 @@ MIN_DESCONTO = int(os.getenv("MIN_DESCONTO", "40"))
 URGENTE = int(os.getenv("URGENTE", "60"))
 RESUMO_HORAS = os.getenv("RESUMO_HORAS", "todas")      # "todas" ou ex.: "9,12,15,18,21"
 RESUMO_MAX = int(os.getenv("RESUMO_MAX", "0"))          # máx. de ofertas por resumo (0 = todas)
+FOTOS = os.getenv("FOTOS", "1") == "1"                 # alertas na hora com foto do produto
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
-CANAL = os.getenv("TELEGRAM_CANAL", "").strip()  # ex.: @cacadescontos40
-CANAL_HORAS = {int(h) for h in os.getenv("CANAL_HORAS", "9,12,15,18,21").split(",") if h.strip()}
-CANAL_MAX = int(os.getenv("CANAL_MAX", "10"))
-AVISO = "\n\n<i>Link de afiliado: como Associado da Amazon, ganho com compras qualificadas.</i>"
 TZ = ZoneInfo("America/Sao_Paulo")
-WA_URL = os.getenv("WA_URL", "").strip()  # ex.: http://127.0.0.1:3399/send (ponte wa.mjs)
 
 BASE = "https://www.amazon.com.br"
 TG = f"https://api.telegram.org/bot{TOKEN}"
@@ -86,18 +82,41 @@ def enviar(chat, texto):
     return True
 
 
-def para_whatsapp(texto):
-    """Repassa ao Canal do WhatsApp (via ponte wa.mjs), convertendo HTML do Telegram."""
-    if not WA_URL:
-        return
-    t = re.sub(r'<a href="([^"]+)">(.*?)</a>', r"\2\n\1", texto)
-    for de, para in (("<b>", "*"), ("</b>", "*"), ("<s>", "~"), ("</s>", "~"), ("<i>", "_"), ("</i>", "_")):
-        t = t.replace(de, para)
-    t = html.unescape(re.sub(r"<[^>]+>", "", t))
+def enviar_foto(chat, foto, legenda):
+    """Envia foto com legenda; se a foto falhar, manda só o texto."""
     try:
-        requests.post(WA_URL, json={"text": t}, timeout=5)
+        r = requests.post(TG + "/sendPhoto", data={
+            "chat_id": chat, "photo": foto, "caption": legenda, "parse_mode": "HTML"}, timeout=30)
     except requests.RequestException as e:
-        log(f"WhatsApp indisponivel: {e}")
+        log(f"Erro Telegram foto {chat}: {e}")
+        return enviar(chat, legenda)
+    if r.status_code == 429:
+        time.sleep(r.json().get("parameters", {}).get("retry_after", 5) + 1)
+        return enviar_foto(chat, foto, legenda)
+    if r.status_code == 403:
+        return False
+    if not r.ok:  # foto inválida etc.
+        return enviar(chat, legenda)
+    time.sleep(0.4)
+    return True
+
+
+def foto_url(it):
+    return f"https://m.media-amazon.com/images/I/{it['img']}._AC_SL500_.jpg" if it.get("img") else None
+
+
+def para_todos_oferta(asin, it):
+    """Uma oferta = uma mensagem com foto (ou texto, se não houver foto)."""
+    legenda = linha(asin, it)
+    foto = foto_url(it)
+    with lock:
+        destinos = list(dict.fromkeys(ADMINS + ST["inscritos"]))
+    for c in destinos:
+        ok = enviar_foto(c, foto, legenda) if foto else enviar(c, legenda)
+        if not ok and c in ST["inscritos"]:
+            with lock:
+                ST["inscritos"].remove(c)
+            log(f"Removido (bloqueou o bot): {c}")
 
 
 def para_admins(texto):
@@ -105,13 +124,7 @@ def para_admins(texto):
         enviar(c, texto)
 
 
-def para_todos(texto, canal=True):
-    texto = texto + AVISO
-    if CANAL and canal:
-        if not enviar(CANAL, texto):
-            log(f"Canal {CANAL} recusou a mensagem (o bot e admin do canal?)")
-    if canal:
-        para_whatsapp(texto)
+def para_todos(texto):
     with lock:
         destinos = list(dict.fromkeys(ADMINS + ST["inscritos"]))
     for c in destinos:
@@ -281,9 +294,14 @@ def ciclo():
     if novos_urg:
         novos_urg.sort(key=lambda a: -urg[a]["pc"])
         log(f"{len(novos_urg)} urgentes novas")
-        for m in em_blocos(f"🔥 <b>{len(novos_urg)} oferta(s) com {URGENTE}%+ agora</b>",
-                           [linha(a, urg[a]) for a in novos_urg]):
-            para_todos(m)
+        if FOTOS:
+            for a in novos_urg:
+                para_todos_oferta(a, {**urg[a], "t": "🔥 " + urg[a]["t"]})
+            salvar()
+        else:
+            for m in em_blocos(f"🔥 <b>{len(novos_urg)} oferta(s) com {URGENTE}%+ agora</b>",
+                               [linha(a, urg[a]) for a in novos_urg]):
+                para_todos(m)
 
     if comuns:
         log(f"resumo: {len(novos_com)} novas comuns")
@@ -296,29 +314,7 @@ def ciclo():
             if extra > 0:
                 linhas.append(f"<i>+ {extra} outras com desconto menor</i>")
             for m in em_blocos(titulo, linhas):
-                para_todos(m, canal=False)
-            with lock:
-                pend = ST.setdefault("canal_pend", {})
-                for a in novos_com:
-                    pend[a] = comuns[a]
-
-
-    # canal: resumo curto (so as melhores) nos horarios de CANAL_HORAS
-    agora = datetime.now(TZ)
-    chave = agora.strftime("%Y-%m-%d %H")
-    pend = ST.get("canal_pend") or {}
-    if CANAL and pend and agora.hour in CANAL_HORAS and ST.get("canal_ult") != chave:
-        top = sorted(pend, key=lambda a: -pend[a]["pc"])[:CANAL_MAX]
-        titulo = f"🛒 <b>Top {len(top)} ofertas de {MIN_DESCONTO}% a {URGENTE - 1}%</b>"
-        for m in em_blocos(titulo, [linha(a, pend[a]) for a in top]):
-            if not enviar(CANAL, m + AVISO):
-                log(f"Canal {CANAL} recusou o resumo")
-            para_whatsapp(m + AVISO)
-        with lock:
-            ST["canal_pend"] = {}
-            ST["canal_ult"] = chave
-        salvar()
-        log(f"canal: resumo com {len(top)} de {len(pend)} ofertas")
+                para_todos(m)
 
 
 def main():
