@@ -183,6 +183,7 @@ WA_FOTO_MODO = os.getenv("WA_FOTO_MODO", "previa")
 WHAPI_TOKEN = os.getenv("WHAPI_TOKEN", "").strip()  # se preenchido, posta pelo Whapi (foto grande no Canal)
 WHAPI_PARA = os.getenv("WHAPI_PARA", "").strip()    # ex.: 120363432321331568@newsletter
 WHAPI_ESTILO = os.getenv("WHAPI_ESTILO", "unica")  # "unica" (colagem + lista numa mensagem), "individual" ou "colagem"
+WA_CANAL_LINK = os.getenv("WA_CANAL_LINK", "").strip()  # link de convite do Canal (vai no rodapé de todo post)
 NUM = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
 
 
@@ -320,6 +321,8 @@ def wa_publicar(forcar=False):
 def wa_post(top, rotulo="", extra=0, ultimo=True, titulo=None, sub=""):
     """Um post do WhatsApp com até WA_MAX ofertas. Devolve True se saiu."""
     aviso = AVISO_WA if ultimo else ""
+    if WA_CANAL_LINK:  # rodapé em TODO post: quem receber encaminhado consegue entrar no canal
+        aviso = f"\n\n📲 *Gostou? Receba ofertas assim todo dia:*\n👉 Entre no canal Caça-Descontos: {WA_CANAL_LINK}" + aviso
     corpo = "\n\n".join(wa_item(i, a, it) for i, (a, it) in enumerate(top))
     cab = (titulo or f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*") + rotulo + (f"\n_{sub}_" if sub else "")
     texto = (f"{cab}\n"
