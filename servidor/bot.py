@@ -271,10 +271,12 @@ def whapi(tipo, payload):
                           headers={"Authorization": f"Bearer {WHAPI_TOKEN}", "Accept": "application/json"})
     except requests.RequestException as e:
         log(f"Whapi indisponível: {e}")
+        stat("erros_wa")
         return False
     if not r.ok:
         log(f"Whapi {tipo} falhou ({r.status_code}): {r.text[:200]}")
         para_admins(f"⚠️ Whapi recusou o post ({r.status_code}): {html.escape(r.text[:150])}")
+        stat("erros_wa")
     return r.ok
 
 
@@ -316,6 +318,11 @@ def wa_publicar(forcar=False):
         ST["wa_ult"] = time.time()
     salvar()
     log(f"WhatsApp: {postadas} de {len(todas)} ofertas em {len(partes)} post(s)")
+    if postadas:
+        stat("posts_wa", -(-postadas // WA_MAX))
+        stat("ofertas_wa", postadas)
+        ST["wa_ult_post"] = time.time()
+        ST["wa_alerta_parado"] = False
 
 
 def wa_post(top, rotulo="", extra=0, ultimo=True, titulo=None, sub=""):
@@ -484,6 +491,8 @@ def ouvir_telegram():
                 qual = "top" if txt.startswith("/testetop") else "achados"
                 threading.Thread(target=wa_tematicos, kwargs={"forcar": qual}, daemon=True).start()
                 enviar(chat, f"🧪 Postando o {'Top 5 do dia' if qual == 'top' else 'Achadinhos'} no WhatsApp…")
+            elif txt.startswith("/relatorio") and chat in ADMINS:
+                enviar(chat, texto_relatorio())
             elif txt.startswith("/status") and chat in ADMINS:
                 enviar(chat, f"🤖 Online. Inscritos: {len(ST['inscritos'])} · "
                              f"produtos conhecidos: {len(ST['vistos'])} · "
@@ -639,6 +648,52 @@ def wa_tematicos(forcar=None):
         salvar()
 
 
+# ---------- relatório diário e vigia do canal ----------
+RELATORIO_HORA = int(os.getenv("RELATORIO_HORA", "22"))      # -1 desliga
+PARADO_HORAS = float(os.getenv("PARADO_HORAS", "3"))          # alerta se o canal ficar tanto tempo sem post
+
+
+def stat(chave, n=1):
+    dia = datetime.now(TZ).strftime("%Y-%m-%d")
+    with lock:
+        st = ST.get("stats") or {}
+        if st.get("d") != dia:
+            st = {"d": dia}
+        st[chave] = st.get(chave, 0) + n
+        ST["stats"] = st
+
+
+def texto_relatorio():
+    st = ST.get("stats") or {}
+    g = lambda k: st.get(k, 0)
+    ult = ST.get("wa_ult_post")
+    ult_txt = f"há {int((time.time() - ult) // 60)} min" if ult else "ainda nenhum"
+    col = ST.get("ult_gerado")
+    col_txt = f"última leitura há {int(idade_min(col))} min" if col else "sem leitura"
+    return (f"📊 <b>Relatório de hoje</b> ({datetime.now(TZ).strftime('%d/%m %H:%M')})\n\n"
+            f"🔎 Ofertas novas: {g('novas_urg') + g('novas_com')} "
+            f"({g('novas_urg')} com {URGENTE}%+ e {g('novas_com')} de {MIN_DESCONTO}% a {URGENTE - 1}%)\n"
+            f"🚫 Barradas por desconto maquiado: {g('maquiadas')}\n"
+            f"✂️ Canceladas por excesso: {g('canceladas')}\n"
+            f"📲 WhatsApp: {g('posts_wa')} posts com {g('ofertas_wa')} ofertas · último post {ult_txt}\n"
+            f"⚠️ Erros do Whapi: {g('erros_wa')}\n"
+            f"🤖 Coletor: {'Amazon bloqueada ⚠️' if ST.get('bloqueado') else 'ok'}, {col_txt}")
+
+
+def vigiar():
+    agora = datetime.now(TZ)
+    dia = agora.strftime("%Y-%m-%d")
+    if agora.hour == RELATORIO_HORA and ST.get("relatorio_ult") != dia:
+        ST["relatorio_ult"] = dia
+        para_admins(texto_relatorio())
+    ult = ST.get("wa_ult_post")
+    if (WHAPI_TOKEN or WA_URL) and ult and 9 <= agora.hour <= 23 and not ST.get("wa_alerta_parado") \
+            and time.time() - ult > PARADO_HORAS * 3600:
+        ST["wa_alerta_parado"] = True
+        para_admins(f"⚠️ O canal do WhatsApp está há mais de {PARADO_HORAS:g}h sem post. "
+                    "Pode ser falta de ofertas novas ou problema no Whapi. Mande /relatorio para ver os números.")
+
+
 # ---------- ciclo principal ----------
 def hora_de_resumo(agora):
     if RESUMO_HORAS == "todas":
@@ -689,8 +744,12 @@ def ciclo():
     maquiadas = {a for a in novos_urg if not avaliar(a, urg[a])} | {a for a in novos_com if not avaliar(a, comuns[a])}
     if maquiadas:
         log(f"{len(maquiadas)} oferta(s) ignoradas: já estiveram mais baratas nos últimos 30 dias")
+    stat("maquiadas", len(maquiadas))
     novos_urg = [a for a in novos_urg if a not in maquiadas]
     novos_com = [a for a in novos_com if a not in maquiadas]
+    if ST["base_feita"]:
+        stat("novas_urg", len(novos_urg))
+        stat("novas_com", len(novos_com))
     registrar_precos({**comuns, **urg})
     salvar_precos()
     with lock:
@@ -716,6 +775,7 @@ def ciclo():
             for a in novos_urg[limite:]:
                 al[a] = [float(urg[a]["p"]), time.time()]
         novos_urg = novos_urg[:limite]
+        stat("canceladas", canc)
         log(f"Enxurrada: {limite + canc} urgentes de uma vez; enviando {limite}, {canc} canceladas")
         para_admins(f"⚠️ Chegaram {limite + canc} ofertas de uma vez. Mandei só as {limite} melhores "
                     f"e cancelei as outras {canc}.")
@@ -796,6 +856,7 @@ def main():
             ciclo()
             wa_publicar()
             wa_tematicos()
+            vigiar()
             erro_avisado = False
         except Exception as e:
             log(f"Falha no ciclo: {e!r}")
