@@ -27,6 +27,7 @@ AVISO = "\n\n<i>Link de afiliado: como Associado da Amazon, ganho com compras qu
 AVISO_WA = "\n\n_Links de afiliado: como Associado da Amazon, ganho com compras qualificadas._"
 WA_URL = os.getenv("WA_URL", "").strip()            # ponte do WhatsApp, ex.: http://127.0.0.1:3399/send
 FOTOS = os.getenv("FOTOS", "1") == "1"              # álbuns com foto no Telegram
+MAX_MSGS = int(os.getenv("MAX_MSGS", "4"))          # trava: no máx. 4 mensagens por leva no Telegram
 TZ = ZoneInfo("America/Sao_Paulo")
 
 BASE = "https://www.amazon.com.br"
@@ -157,7 +158,7 @@ def para_todos_albuns(itens, titulo, canal=True):
         destinos = list(dict.fromkeys(ADMINS + ST["inscritos"]))
     if CANAL and canal:
         destinos = [CANAL] + destinos
-    for g in albuns(com, titulo):
+    for g in albuns(com, titulo)[:MAX_MSGS]:
         for c in destinos:
             if not enviar_album(c, g, titulo):
                 if c == CANAL:
@@ -167,7 +168,7 @@ def para_todos_albuns(itens, titulo, canal=True):
                         ST["inscritos"].remove(c)
                     log(f"Removido (bloqueou o bot): {c}")
     if sem:
-        for m in em_blocos(titulo, [linha(a, it) for a, it in sem]):
+        for m in em_blocos(titulo, [linha(a, it) for a, it in sem])[:MAX_MSGS]:
             para_todos(m, canal=canal)
     salvar()
 
@@ -177,7 +178,7 @@ def para_todos_albuns(itens, titulo, canal=True):
 # sai UM post com uma colagem das melhores fotos (numeradas) + a lista numerada embaixo.
 WA_INTERVALO_MIN = int(os.getenv("WA_INTERVALO_MIN", "30"))
 WA_MAX = int(os.getenv("WA_MAX", "9"))  # produtos por post (colagem 3x3)
-WA_POSTS_MAX = int(os.getenv("WA_POSTS_MAX", "0"))  # máx. de posts por rodada (0 = todos)
+WA_POSTS_MAX = int(os.getenv("WA_POSTS_MAX", "4"))  # máx. de posts por rodada (0 = todos); o resto é cancelado
 WA_FOTO_MODO = os.getenv("WA_FOTO_MODO", "previa")
 WHAPI_TOKEN = os.getenv("WHAPI_TOKEN", "").strip()  # se preenchido, posta pelo Whapi (foto grande no Canal)
 WHAPI_PARA = os.getenv("WHAPI_PARA", "").strip()    # ex.: 120363432321331568@newsletter
@@ -289,6 +290,10 @@ def wa_publicar(forcar=False):
     partes = [todas[k:k + WA_MAX] for k in range(0, len(todas), WA_MAX)]
     if WA_POSTS_MAX:
         partes = partes[:WA_POSTS_MAX]
+    with lock:  # tira tudo da fila já: o que não couber nos posts fica cancelado
+        ST["wa_pend"] = {}
+        ST["wa_ult"] = time.time()
+    salvar()
     postadas = 0
     for n, top in enumerate(partes):
         if n:
@@ -698,12 +703,26 @@ def ciclo():
                         "A partir de agora aviso só as novas.")
         return
 
+    # trava contra enxurrada: muitas ofertas de uma vez -> só as melhores, o resto é cancelado
+    limite = WA_MAX * (WA_POSTS_MAX or 4)
+    if len(novos_urg) > limite:
+        canc = len(novos_urg) - limite
+        novos_urg.sort(key=lambda a: -urg[a]["pc"])
+        with lock:
+            al = ST.setdefault("alertas", {})
+            for a in novos_urg[limite:]:
+                al[a] = [float(urg[a]["p"]), time.time()]
+        novos_urg = novos_urg[:limite]
+        log(f"Enxurrada: {limite + canc} urgentes de uma vez; enviando {limite}, {canc} canceladas")
+        para_admins(f"⚠️ Chegaram {limite + canc} ofertas de uma vez. Mandei só as {limite} melhores "
+                    f"e cancelei as outras {canc}.")
     with lock:
         al = ST.setdefault("alertas", {})
         for a in novos_urg:
             al[a] = [float(urg[a]["p"]), time.time()]
         for a in novos_com:
             al[a] = [float(comuns[a]["p"]), time.time()]
+    salvar()
 
     if novos_urg:
         novos_urg.sort(key=lambda a: -urg[a]["pc"])
@@ -727,7 +746,12 @@ def ciclo():
             linhas = [linha(a, comuns[a]) for a in novos_com[:limite]]
             if extra > 0:
                 linhas.append(f"<i>+ {extra} outras com desconto menor</i>")
-            for m in em_blocos(titulo, linhas):
+            msgs = em_blocos(titulo, linhas)
+            if len(msgs) > MAX_MSGS:
+                log(f"Resumo grande ({len(novos_com)} ofertas): mandando só {MAX_MSGS} mensagens")
+                msgs = msgs[:MAX_MSGS]
+                msgs[-1] += "\n\n<i>(lista cortada: muitas ofertas de uma vez)</i>"
+            for m in msgs:
                 para_todos(m, canal=False)
             with lock:
                 pend = ST.setdefault("canal_pend", {})
