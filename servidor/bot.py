@@ -259,6 +259,8 @@ def wa_item(n, asin, it):
         selo += f"📉 _baixou de novo (era {brl(it['baixou'])})_\n"
     if it.get("min30"):
         selo += "🏆 _menor preço em 30 dias_\n"
+    if MERCADO_MODO == "filtrar" and (it.get("mercado") or {}).get("v") == "barato":
+        selo += "✅ _mais barato que nas outras lojas_\n"
     return (f"{NUM[n]} *{it['pc']}% OFF*{rel}\n"
             f"{curto(it['t'], 70)}\n"
             f"{de}*{brl(it['p'])}*\n{selo}"
@@ -280,6 +282,114 @@ def whapi(tipo, payload):
     return r.ok
 
 
+# ---------- comparação com outras lojas (DeepSeek: busca na web + IA) ----------
+DEEPSEEK_KEY = os.getenv("DEEPSEEK_KEY", "").strip()
+MERCADO_MODO = os.getenv("MERCADO_MODO", "observar")   # "observar" (só anota), "filtrar" (barra e põe selo) ou "desligado"
+DS = "https://api.deepseek.com"
+ICONE_MERCADO = {"barato": "✅", "caro": "❌", "inflado": "🎈", "parecido": "≈", "incerto": "❓", "sem_dados": "❓", "erro": "⚠️"}
+
+
+def _ds(caminho, payload):
+    r = requests.post(DS + caminho, json=payload, timeout=90,
+                      headers={"Authorization": f"Bearer {DEEPSEEK_KEY}", "Content-Type": "application/json"})
+    if r.status_code == 402 and not ST.get("ds_sem_saldo"):
+        ST["ds_sem_saldo"] = True
+        para_admins("⚠️ DeepSeek sem saldo: a comparação com outras lojas parou até você recarregar.")
+    r.raise_for_status()
+    ST["ds_sem_saldo"] = False
+    return r.json()
+
+
+def _num(x):
+    try:
+        v = float(str(x).replace("R$", "").replace(".", "").replace(",", ".")) if isinstance(x, str) else float(x)
+        return v if v > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def mercado_checar(asin, it):
+    """Busca o produto em outras lojas e pede à IA o veredito. Resultado fica 3 dias em cache."""
+    p = float(it["p"])
+    with lock:
+        c = (ST.get("mercado") or {}).get(asin)
+    if c and time.time() - c["ts"] < 3 * 86400 and abs(c["p"] - p) <= p * 0.02:
+        return c
+    c = {"ts": time.time(), "p": p, "t": it["t"][:70], "pc": it["pc"]}
+    try:
+        q = re.sub(r"[^\w\s\-./,]", " ", it["t"])
+        q = re.sub(r"\s+", " ", curto(q, 110)).strip() + " preço"
+        res = [x for x in _ds("/v1/tools/search", {"query": q[:128], "count": 10}).get("results", [])
+               if "amazon." not in (x.get("url") or "")]
+        stat("mercado_buscas")
+        if not res:
+            c["v"] = "sem_dados"
+        else:
+            fontes = "\n".join(
+                f"- [{x.get('site_name') or ''}] {(x.get('title') or '')[:120]} | "
+                f"{(x.get('summary') or x.get('snippet') or '')[:500]}" for x in res[:8])
+            d = it.get("d")
+            prompt = (f'Produto na Amazon: "{it["t"]}"\nPreço atual na Amazon: R$ {p:.2f}\n'
+                      f'Preço "de" anunciado pela Amazon: {f"R$ {float(d):.2f}" if d else "não informado"}\n\n'
+                      f"Resultados de busca em outras lojas:\n{fontes}\n\n"
+                      "Responda em JSON com as chaves:\n"
+                      '"mesmo_produto": true só se algum resultado for claramente o MESMO produto '
+                      "(mesmo modelo, capacidade, cor não importa, mesma quantidade);\n"
+                      '"menor_preco": menor preço à vista em R$ do mesmo produto em outra loja (número) ou null;\n'
+                      '"loja": nome dessa loja ou null;\n'
+                      '"preco_tipico": preço normal desse produto no mercado em R$ (número) ou null;\n'
+                      '"confianca": "alta", "media" ou "baixa".\n'
+                      "Use apenas preços que aparecem nos resultados. Não invente.")
+            out = _ds("/chat/completions", {
+                "model": "deepseek-chat", "temperature": 0, "response_format": {"type": "json_object"},
+                "messages": [{"role": "system", "content": "Você compara preços no varejo brasileiro. Responda só JSON."},
+                             {"role": "user", "content": prompt}]})
+            j = json.loads(out["choices"][0]["message"]["content"])
+            mn, tip = _num(j.get("menor_preco")), _num(j.get("preco_tipico"))
+            de = _num(d) if d else None
+            c.update(mn=mn, tip=tip, loja=(j.get("loja") or "")[:30])
+            if not j.get("mesmo_produto") or j.get("confianca") == "baixa" or not (mn or tip):
+                c["v"] = "incerto"
+            elif mn and mn < p * 0.9:
+                c["v"] = "caro"            # outra loja pelo menos 10% mais barata
+            elif de and tip and de > tip * 1.5 and p > tip * 0.85:
+                c["v"] = "inflado"         # "de" bem acima do mercado e o preço atual quase igual ao normal
+            elif mn and mn >= p * 0.98:
+                c["v"] = "barato"
+            else:
+                c["v"] = "parecido"
+    except Exception as e:
+        log(f"Comparação {asin} falhou: {e!r}")
+        c["v"] = "erro"
+    stat("mercado_" + c["v"])
+    with lock:
+        ST.setdefault("mercado", {})[asin] = c
+        lg = ST.setdefault("mercado_log", [])
+        lg.append([asin, c])
+        del lg[:-30]
+    return c
+
+
+def mercado_lote(itens):
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for (a, it), c in zip(itens, ex.map(lambda x: mercado_checar(*x), itens)):
+            it["mercado"] = c
+
+
+def texto_mercado():
+    lg = (ST.get("mercado_log") or [])[-12:]
+    if not lg:
+        return "Ainda não comparei nenhuma oferta com outras lojas."
+    br = lambda v: brl(v) if v else "?"
+    linhas = [f"{ICONE_MERCADO.get(c['v'], '?')} <b>{c['pc']}%</b> {html.escape(c['t'])}\n"
+              f"   Amazon {brl(c['p'])} · fora {br(c.get('mn'))}{' (' + html.escape(c['loja']) + ')' if c.get('loja') else ''}"
+              f" · normal {br(c.get('tip'))} · <a href=\"{BASE}/dp/{a}\">ver</a>" for a, c in reversed(lg)]
+    return (f"🔍 <b>Últimas comparações</b> (modo: {MERCADO_MODO})\n"
+            "✅ Amazon mais barata · ❌ outra loja mais barata · 🎈 preço \"de\" inflado · ≈ parecido · ❓ sem comparação\n\n"
+            + "\n\n".join(linhas))
+
+
 def wa_publicar(forcar=False):
     """Se já passou o intervalo, posta TODAS as pendentes, em posts de até WA_MAX ofertas."""
     if not (WA_URL or WHAPI_TOKEN):
@@ -290,6 +400,14 @@ def wa_publicar(forcar=False):
     if not forcar and time.time() - ST.get("wa_ult", 0) < WA_INTERVALO_MIN * 60:
         return
     todas = sorted(pend.items(), key=lambda x: -x[1]["pc"])
+    if DEEPSEEK_KEY and MERCADO_MODO in ("observar", "filtrar"):
+        n = WA_MAX * (WA_POSTS_MAX or 4)
+        mercado_lote(todas[:n + (n // 2 if MERCADO_MODO == "filtrar" else 0)])
+        if MERCADO_MODO == "filtrar":
+            antes = len(todas)
+            todas = [(a, it) for a, it in todas if (it.get("mercado") or {}).get("v") not in ("caro", "inflado")]
+            if antes - len(todas):
+                log(f"Outras lojas: {antes - len(todas)} oferta(s) barradas")
     partes = [todas[k:k + WA_MAX] for k in range(0, len(todas), WA_MAX)]
     if WA_POSTS_MAX:
         partes = partes[:WA_POSTS_MAX]
@@ -491,6 +609,8 @@ def ouvir_telegram():
                 qual = "top" if txt.startswith("/testetop") else "achados"
                 threading.Thread(target=wa_tematicos, kwargs={"forcar": qual}, daemon=True).start()
                 enviar(chat, f"🧪 Postando o {'Top 5 do dia' if qual == 'top' else 'Achadinhos'} no WhatsApp…")
+            elif txt.startswith("/mercado") and chat in ADMINS:
+                enviar(chat, texto_mercado())
             elif txt.startswith("/relatorio") and chat in ADMINS:
                 enviar(chat, texto_relatorio())
             elif txt.startswith("/status") and chat in ADMINS:
@@ -573,6 +693,9 @@ def salvar_precos():
     al = ST.get("alertas") or {}
     for a in [a for a, (p, t) in al.items() if time.time() - t > 60 * 86400]:
         del al[a]
+    mc = ST.get("mercado") or {}
+    for a in [a for a, c in mc.items() if time.time() - c["ts"] > 7 * 86400]:
+        del mc[a]
     tmp = PRECOS_FILE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(PRECOS, f, separators=(",", ":"))
@@ -677,7 +800,11 @@ def texto_relatorio():
             f"✂️ Canceladas por excesso: {g('canceladas')}\n"
             f"📲 WhatsApp: {g('posts_wa')} posts com {g('ofertas_wa')} ofertas · último post {ult_txt}\n"
             f"⚠️ Erros do Whapi: {g('erros_wa')}\n"
-            f"🤖 Coletor: {'Amazon bloqueada ⚠️' if ST.get('bloqueado') else 'ok'}, {col_txt}")
+            f"🤖 Coletor: {'Amazon bloqueada ⚠️' if ST.get('bloqueado') else 'ok'}, {col_txt}"
+            + (f"\n🔍 Outras lojas ({MERCADO_MODO}): {g('mercado_barato')} mais baratas na Amazon · "
+               f"{g('mercado_caro')} mais caras · {g('mercado_inflado')} com \"de\" inflado · "
+               f"{g('mercado_parecido')} parecidas · {g('mercado_incerto') + g('mercado_sem_dados')} sem comparação"
+               f" · {g('mercado_erro')} erros  (detalhes: /mercado)" if DEEPSEEK_KEY else ""))
 
 
 def vigiar():
