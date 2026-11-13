@@ -13,6 +13,7 @@ BASE = "https://www.amazon.com.br"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 CAP = 480
+AMOSTRA = []  # alguns produtos crus da API, para descobrir campos extras (avaliações, tipo do preço "de")
 
 
 class Bloqueado(Exception):
@@ -71,8 +72,12 @@ def faixa(lo, hi, dep):
         j = api(lo, hi, dep, idx)
         ps = j.get("products") or []
         for p in ps:
+            if len(AMOSTRA) < 4 and p.get("price", {}).get("basisPrice"):
+                AMOSTRA.append(p)
             it = item(p)
             if it:
+                if dep:
+                    it["dep"] = dep
                 itens[p["asin"]] = it
         nxt = j.get("nextIndex")
         if not ps or nxt is None or nxt <= idx:
@@ -122,6 +127,7 @@ def main():
         urg = varrer(fatiar(URG, 69, 5) + [(70, 100)], deps)
         salvar("urgentes.json", {"gerado": agora, "itens": urg})
         print(f"urgentes: {len(urg)}", flush=True)
+        salvar("amostra.json", AMOSTRA)
         if completo:
             com = varrer(fatiar(MIN, URG - 1, 4), deps)
             salvar("comuns.json", {"gerado": agora, "itens": com})
