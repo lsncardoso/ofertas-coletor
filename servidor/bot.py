@@ -5,7 +5,7 @@
 - Cobre todas as ofertas da Amazon que aceitam filtro de desconto (todos os departamentos).
 - Quem manda /start no bot passa a receber; /stop para sair. Admins recebem avisos de erro e de inscritos.
 """
-import base64, html, json, logging, os, re, threading, time
+import base64, html, json, logging, math, os, re, threading, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -259,6 +259,8 @@ def wa_item(n, asin, it):
         selo += f"📉 _baixou de novo (era {brl(it['baixou'])})_\n"
     if it.get("min30"):
         selo += "🏆 _menor preço em 30 dias_\n"
+    if econ(it) >= 100:
+        selo += f"💰 _economia de {brl(econ(it))}_\n"
     if MERCADO_MODO == "filtrar" and (it.get("mercado") or {}).get("v") == "barato":
         selo += "✅ _mais barato que nas outras lojas_\n"
     return (f"{NUM[n]} *{it['pc']}% OFF*{rel}\n"
@@ -308,19 +310,34 @@ def _num(x):
         return None
 
 
+LOJAS_FORA = ("amazon.", "aliexpress", "temu.", "shein.", "ebay.", "alibaba", "walmart.com", "bestbuy.",
+              "wish.com", "banggood", "dhgate")
+
+
+def loja_brasileira(url):
+    """Só lojas/sites do Brasil: domínio .br ou páginas /br/ e /pt-br/ de marcas (ex.: samsung.com/br)."""
+    m = re.match(r"https?://([^/]+)(/[^?#]*)?", url.lower())
+    if not m:
+        return False
+    host, caminho = m.group(1), (m.group(2) or "/")
+    if any(x in host for x in LOJAS_FORA):
+        return False
+    return host.endswith(".br") or caminho.startswith(("/br/", "/pt-br/", "/pt_br/"))
+
+
 def mercado_checar(asin, it):
     """Busca o produto em outras lojas e pede à IA o veredito. Resultado fica 3 dias em cache."""
     p = float(it["p"])
     with lock:
         c = (ST.get("mercado") or {}).get(asin)
-    if c and time.time() - c["ts"] < 3 * 86400 and abs(c["p"] - p) <= p * 0.02:
+    if c and c.get("v") != "erro" and time.time() - c["ts"] < 3 * 86400 and abs(c["p"] - p) <= p * 0.02:
         return c
     c = {"ts": time.time(), "p": p, "t": it["t"][:70], "pc": it["pc"]}
     try:
         q = re.sub(r"[^\w\s\-./,]", " ", it["t"])
-        q = re.sub(r"\s+", " ", curto(q, 110)).strip() + " preço"
-        res = [x for x in _ds("/v1/tools/search", {"query": q[:128], "count": 10}).get("results", [])
-               if "amazon." not in (x.get("url") or "")]
+        q = re.sub(r"\s+", " ", curto(q, 100)).strip() + " preço Brasil"
+        res = [x for x in _ds("/v1/tools/search", {"query": q[:128], "count": 15}).get("results", [])
+               if loja_brasileira(x.get("url") or "")]
         stat("mercado_buscas")
         if not res:
             c["v"] = "sem_dados"
@@ -339,7 +356,10 @@ def mercado_checar(asin, it):
                       '"loja": nome dessa loja ou null;\n'
                       '"preco_tipico": preço normal desse produto no mercado em R$ (número) ou null;\n'
                       '"confianca": "alta", "media" ou "baixa".\n'
-                      "Use apenas preços que aparecem nos resultados. Não invente.")
+                      "Use apenas preços em reais (R$) de lojas brasileiras que aparecem nos resultados. "
+                      "Ignore preços em dólar, euro ou de sites internacionais e de importação, "
+                      "porque com impostos o produto chega ao Brasil custando muito mais. "
+                      "Ignore também preços de produtos usados, recondicionados ou de outro modelo. Não invente.")
             out = _ds("/chat/completions", {
                 "model": "deepseek-chat", "temperature": 0, "response_format": {"type": "json_object"},
                 "messages": [{"role": "system", "content": "Você compara preços no varejo brasileiro. Responda só JSON."},
@@ -399,7 +419,7 @@ def wa_publicar(forcar=False):
         return
     if not forcar and time.time() - ST.get("wa_ult", 0) < WA_INTERVALO_MIN * 60:
         return
-    todas = sorted(pend.items(), key=lambda x: -x[1]["pc"])
+    todas = sorted(pend.items(), key=lambda x: -pontos(x[1]))
     if DEEPSEEK_KEY and MERCADO_MODO in ("observar", "filtrar"):
         n = WA_MAX * (WA_POSTS_MAX or 4)
         mercado_lote(todas[:n + (n // 2 if MERCADO_MODO == "filtrar" else 0)])
@@ -408,6 +428,7 @@ def wa_publicar(forcar=False):
             todas = [(a, it) for a, it in todas if (it.get("mercado") or {}).get("v") not in ("caro", "inflado")]
             if antes - len(todas):
                 log(f"Outras lojas: {antes - len(todas)} oferta(s) barradas")
+        todas.sort(key=lambda x: -pontos(x[1]))
     partes = [todas[k:k + WA_MAX] for k in range(0, len(todas), WA_MAX)]
     if WA_POSTS_MAX:
         partes = partes[:WA_POSTS_MAX]
@@ -650,6 +671,52 @@ def linha(asin, it):
             f"<a href=\"{BASE}/dp/{asin}?tag={AMAZON_TAG}\">{html.escape(it['t'][:100])}</a>")
 
 
+# ---------- filtros de lixo e pontuação ----------
+MIN_AVAL = int(os.getenv("MIN_AVAL", "20"))                # mínimo de avaliações para qualquer produto
+MIN_AVAL_LIVRO = int(os.getenv("MIN_AVAL_LIVRO", "100"))   # livros precisam de mais
+MIN_NOTA = float(os.getenv("MIN_NOTA", "4.0"))             # nota mínima (estrelas)
+MIN_PRECO = float(os.getenv("MIN_PRECO", "15"))            # nada abaixo disso
+VALOR_ECON = float(os.getenv("VALOR_ECON", "150"))         # 40-49% com economia >= isso vai na hora pro WhatsApp
+PALAVRAS_FORA = [w.strip().lower() for w in os.getenv(
+    "PALAVRAS_FORA", "capinha,capa para celular,capa celular,capa iphone,capa galaxy,película,pelicula,"
+    "case para celular,adesivo,chaveiro,refil genérico").split(",") if w.strip()]
+
+
+def econ(it):
+    try:
+        return max(0.0, float(it["d"] or 0) - float(it["p"]))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def motivo_fora(it):
+    """Devolve o motivo para descartar a oferta, ou None se ela presta."""
+    if "na" not in it:          # dado antigo, sem avaliações: deixa passar
+        return None
+    titulo = it["t"].lower()
+    if any(w in titulo for w in PALAVRAS_FORA):
+        return "palavra"
+    if float(it["p"]) < MIN_PRECO:
+        return "barato"
+    livro = "book" in (it.get("cat") or "") or "BOOK" in (it.get("tp") or "")
+    if it["na"] < (MIN_AVAL_LIVRO if livro else MIN_AVAL):
+        return "livro" if livro else "poucas_aval"
+    if it.get("nota") and it["nota"] < MIN_NOTA:
+        return "nota"
+    return None
+
+
+def pontos(it):
+    """Nota da oferta: desconto + economia em R$ + prova social + selos."""
+    s = it["pc"] + min(20, econ(it) / 15)            # R$ 300 de economia vale +20 pontos
+    s += min(8, 2 * math.log10(1 + (it.get("na") or 0)))
+    s += 5 if it.get("min30") else 0
+    s += 3 if it.get("rel") else 0
+    if MERCADO_MODO == "filtrar" and (it.get("mercado") or {}).get("v") in ("caro", "inflado"):
+        s -= 15
+    return s
+
+
 # ---------- qualidade: histórico de preços, sem repetição, sem "maquiagem" ----------
 PRECOS_FILE = os.getenv("PRECOS_FILE", "precos.json")
 REPETIR_DIAS = int(os.getenv("REPETIR_DIAS", "7"))       # não repete o produto antes disso...
@@ -762,7 +829,7 @@ def wa_tematicos(forcar=None):
         ST["achados_ult"] = dia
         todos = {**(baixar("comuns.json") or {}).get("itens", {}), **(baixar("urgentes.json") or {}).get("itens", {})}
         cand = [(a, it) for a, it in todos.items()
-                if WA_ACHADOS_MIN <= float(it["p"]) <= WA_ACHADOS_ATE and it["pc"] >= MIN_DESCONTO and avaliar(a, it)]
+                if WA_ACHADOS_MIN <= float(it["p"]) <= WA_ACHADOS_ATE and it["pc"] >= MIN_DESCONTO and not motivo_fora(it) and avaliar(a, it)]
         top = sorted(cand, key=lambda x: -x[1]["pc"])[:WA_MAX]
         if top:
             wa_post(top, titulo=f"💸 *ACHADINHOS ATÉ R$ {WA_ACHADOS_ATE:.0f}*",
@@ -798,6 +865,9 @@ def texto_relatorio():
             f"({g('novas_urg')} com {URGENTE}%+ e {g('novas_com')} de {MIN_DESCONTO}% a {URGENTE - 1}%)\n"
             f"🚫 Barradas por desconto maquiado: {g('maquiadas')}\n"
             f"✂️ Canceladas por excesso: {g('canceladas')}\n"
+            f"🧹 Lixo filtrado: {g('fora_livro')} livros pouco avaliados · {g('fora_poucas_aval')} com poucas avaliações · "
+            f"{g('fora_nota')} nota baixa · {g('fora_barato')} baratos demais · {g('fora_palavra')} capinhas/películas etc.\n"
+            f"💰 40-49% com economia grande enviadas na hora: {g('valor')}\n"
             f"📲 WhatsApp: {g('posts_wa')} posts com {g('ofertas_wa')} ofertas · último post {ult_txt}\n"
             f"⚠️ Erros do Whapi: {g('erros_wa')}\n"
             f"🤖 Coletor: {'Amazon bloqueada ⚠️' if ST.get('bloqueado') else 'ok'}, {col_txt}"
@@ -868,6 +938,14 @@ def ciclo():
     novos_urg = [a for a, it in urg.items() if it["pc"] >= URGENTE and pode_avisar(a, it, True)]
     novos_com = [a for a, it in comuns.items() if a not in urg and MIN_DESCONTO <= it["pc"] < URGENTE
                  and pode_avisar(a, it, False)]
+    fracas = set()
+    for a in novos_urg + novos_com:
+        m = motivo_fora(urg[a] if a in urg else comuns[a])
+        if m:
+            fracas.add(a)
+            stat("fora_" + m)
+    novos_urg = [a for a in novos_urg if a not in fracas]
+    novos_com = [a for a in novos_com if a not in fracas]
     maquiadas = {a for a in novos_urg if not avaliar(a, urg[a])} | {a for a in novos_com if not avaliar(a, comuns[a])}
     if maquiadas:
         log(f"{len(maquiadas)} oferta(s) ignoradas: já estiveram mais baratas nos últimos 30 dias")
@@ -877,6 +955,11 @@ def ciclo():
     if ST["base_feita"]:
         stat("novas_urg", len(novos_urg))
         stat("novas_com", len(novos_com))
+    if ST["base_feita"]:  # descartadas não voltam a ser analisadas a cada ciclo
+        with lock:
+            al = ST.setdefault("alertas", {})
+            for a in fracas | maquiadas:
+                al[a] = [float((urg.get(a) or comuns.get(a))["p"]), time.time()]
     registrar_precos({**comuns, **urg})
     salvar_precos()
     with lock:
@@ -943,10 +1026,16 @@ def ciclo():
                 msgs[-1] += "\n\n<i>(lista cortada: muitas ofertas de uma vez)</i>"
             for m in msgs:
                 para_todos(m, canal=False)
+            valor = [a for a in novos_com if econ(comuns[a]) >= VALOR_ECON]
+            if valor:
+                log(f"{len(valor)} oferta(s) de 40-49% com economia >= R$ {VALOR_ECON:.0f}: WhatsApp na hora")
+                para_whatsapp([(a, comuns[a]) for a in valor])
+                stat("valor", len(valor))
             with lock:
                 pend = ST.setdefault("canal_pend", {})
                 for a in novos_com:
-                    pend[a] = comuns[a]
+                    if a not in valor:
+                        pend[a] = comuns[a]
 
 
     # canal: resumo curto (so as melhores) nos horarios de CANAL_HORAS
