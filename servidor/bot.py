@@ -544,6 +544,43 @@ def wa_destaque(asin, it):
     return bool(ok)
 
 
+def wa_para_html(t):
+    """Converte a formatação do WhatsApp (*negrito* _itálico_ ~riscado~) para HTML do Telegram."""
+    t = html.escape(t, quote=False)
+    t = re.sub(r"\*([^*\n]+)\*", r"<b>\1</b>", t)
+    t = re.sub(r"(?<![\w/])_([^_\n]+)_(?![\w/])", r"<i>\1</i>", t)
+    return re.sub(r"~([^~\n]+)~", r"<s>\1</s>", t)
+
+
+def teste_destaque(chat):
+    """Mostra no Telegram (só para o admin) como ficaria um destaque com uma oferta real de agora."""
+    try:
+        todos = {**(baixar("comuns.json") or {}).get("itens", {}), **(baixar("urgentes.json") or {}).get("itens", {})}
+        cand = sorted([(a, it) for a, it in todos.items() if econ(it) >= VALOR_ECON and not motivo_fora(it)],
+                      key=lambda x: -pontos(x[1]))[:6]
+        if not cand:
+            enviar(chat, "Não achei agora nenhuma oferta com economia grande para o teste.")
+            return
+        if DEEPSEEK_KEY:
+            mercado_lote(cand)
+        esc = next(((a, it) for a, it in cand if (it.get("mercado") or {}).get("v") == "barato"), cand[0])
+        a, it = esc
+        v = (it.get("mercado") or {}).get("v", "sem DeepSeek")
+        aviso = ("" if v == "barato" else
+                 f"\n\n⚠️ <i>Teste: nenhuma das {len(cand)} melhores foi confirmada como mais barata "
+                 f"(esta ficou como “{v}”), então não iria para o canal.</i>")
+        legenda = "🧪 <b>TESTE — assim fica o destaque no WhatsApp:</b>\n\n" + wa_para_html(texto_destaque(a, it)) + aviso
+        if it.get("img") and visivel(legenda) <= 1024:
+            r = requests.post(TG + "/sendPhoto", data={"chat_id": chat, "photo": foto_url(it),
+                                                       "caption": legenda, "parse_mode": "HTML"}, timeout=60)
+            if r.ok:
+                return
+        enviar(chat, legenda)
+    except Exception as e:
+        log(f"teste destaque: {e!r}")
+        enviar(chat, f"Teste do destaque falhou: {html.escape(str(e)[:200])}")
+
+
 def wa_post(top, rotulo="", extra=0, ultimo=True, titulo=None, sub=""):
     """Um post do WhatsApp com até WA_MAX ofertas. Devolve True se saiu."""
     aviso = AVISO_WA if ultimo else ""
@@ -710,6 +747,9 @@ def ouvir_telegram():
                 qual = "top" if txt.startswith("/testetop") else "achados"
                 threading.Thread(target=wa_tematicos, kwargs={"forcar": qual}, daemon=True).start()
                 enviar(chat, f"🧪 Postando o {'Top 5 do dia' if qual == 'top' else 'Achadinhos'} no WhatsApp…")
+            elif txt.startswith("/testedestaque") and chat in ADMINS:
+                threading.Thread(target=teste_destaque, args=(chat,), daemon=True).start()
+                enviar(chat, "🧪 Montando um destaque de teste com uma oferta real (leva até 1 min)…")
             elif txt.startswith("/mercado") and chat in ADMINS:
                 enviar(chat, texto_mercado())
             elif txt.startswith("/relatorio") and chat in ADMINS:
@@ -1145,6 +1185,10 @@ def ciclo():
 
 def main():
     threading.Thread(target=ouvir_telegram, daemon=True).start()
+    if not ST.get("teste_destaque_v1") and ADMINS:
+        ST["teste_destaque_v1"] = True
+        salvar()
+        threading.Thread(target=teste_destaque, args=(ADMINS[0],), daemon=True).start()
     log(f"Bot iniciado: lendo {GITHUB_REPO} a cada {CHECAR_MIN} min, urgente {URGENTE}%+, resumo {RESUMO_HORAS}")
     erro_avisado = False
     while True:
