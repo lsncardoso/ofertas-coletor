@@ -602,6 +602,7 @@ def wa_post(top, rotulo="", extra=0, ultimo=True, titulo=None, sub=""):
              f"━━━━━━━━━━━━━━\n\n{corpo}\n\n━━━━━━━━━━━━━━")
     if extra > 0:
         texto += f"\n➕ _e mais {extra} ofertas com desconto menor_"
+    texto += f"\n🕒 _Preços de {datetime.now(TZ).strftime('%d/%m às %H:%M')}; podem mudar._"
     texto += aviso
     if WHAPI_TOKEN and WHAPI_PARA and WHAPI_ESTILO == "individual":
         # cabeçalho, depois cada oferta = foto grande com o texto embaixo
@@ -1015,6 +1016,7 @@ def texto_relatorio():
             f"📲 WhatsApp: {g('posts_wa')} posts com {g('ofertas_wa')} ofertas · último post {ult_txt}\n"
             f"⚠️ Erros do Whapi: {g('erros_wa')}\n"
             f"🤖 Coletor: {'Amazon bloqueada ⚠️' if ST.get('bloqueado') else 'ok'}, {col_txt}"
+            + (f"\n💳 Saldo DeepSeek: US$ {ST['ds_saldo']:.2f}" if ST.get("ds_saldo") is not None else "")
             + (f"\n🔍 Outras lojas ({MERCADO_MODO}): {g('mercado_barato')} mais baratas na Amazon · "
                f"{g('mercado_caro')} mais caras · {g('mercado_inflado')} com \"de\" inflado · "
                f"{g('mercado_parecido')} parecidas · {g('mercado_incerto') + g('mercado_sem_dados')} sem comparação"
@@ -1027,6 +1029,9 @@ def vigiar():
     if agora.hour == BACKUP_HORA and ST.get("backup_ult") != dia:
         ST["backup_ult"] = dia
         fazer_backup(dia)
+    if DEEPSEEK_KEY and agora.hour == SALDO_HORA and ST.get("saldo_ult") != dia:
+        ST["saldo_ult"] = dia
+        checar_saldo_ds()
     if agora.hour == RELATORIO_HORA and ST.get("relatorio_ult") != dia:
         ST["relatorio_ult"] = dia
         para_admins(texto_relatorio())
@@ -1229,6 +1234,34 @@ def texto_aprendizado():
 # ---------- backup diário ----------
 BACKUP_HORA = int(os.getenv("BACKUP_HORA", "3"))
 BACKUP_DIAS = int(os.getenv("BACKUP_DIAS", "7"))
+BACKUP_TELEGRAM = os.getenv("BACKUP_TELEGRAM", "1") == "1"   # cópia diária, sem som, no seu Telegram
+HC_URL = os.getenv("HC_URL", "").strip()                    # Healthchecks.io: avisa se o bot parar
+SALDO_HORA = int(os.getenv("SALDO_HORA", "9"))
+DS_SALDO_MIN = float(os.getenv("DS_SALDO_MIN", "2"))        # alerta quando o saldo da DeepSeek ficar abaixo (US$)
+
+
+def sinal_vida(falha=False):
+    if not HC_URL:
+        return
+    try:
+        requests.get(HC_URL + ("/fail" if falha else ""), timeout=10)
+    except requests.RequestException as e:
+        log(f"Healthchecks indisponível: {e}")
+
+
+def checar_saldo_ds():
+    try:
+        r = requests.get(DS + "/user/balance", timeout=30,
+                         headers={"Authorization": f"Bearer {DEEPSEEK_KEY}"})
+        r.raise_for_status()
+        info = (r.json().get("balance_infos") or [{}])[0]
+        saldo = float(info.get("total_balance") or 0)
+        ST["ds_saldo"] = saldo
+        if saldo < DS_SALDO_MIN:
+            para_admins(f"💳 Saldo da DeepSeek baixo: US$ {saldo:.2f}. Recarregue em platform.deepseek.com "
+                        "para a comparação com outras lojas não parar.")
+    except Exception as e:
+        log(f"Saldo DeepSeek: {e!r}")
 
 
 def fazer_backup(dia):
@@ -1241,8 +1274,19 @@ def fazer_backup(dia):
             if os.path.exists(f):
                 shutil.copy2(f, pasta)
         for velho in sorted(os.listdir("backups"))[:-BACKUP_DIAS]:
-            shutil.rmtree(os.path.join("backups", velho), ignore_errors=True)
+            if os.path.isdir(os.path.join("backups", velho)):
+                shutil.rmtree(os.path.join("backups", velho), ignore_errors=True)
         log(f"Backup diário salvo em {pasta}")
+        if BACKUP_TELEGRAM and ADMINS:
+            arq = shutil.make_archive(os.path.join("/tmp", f"backup-bot-{dia}"), "gztar", pasta)
+            with open(arq, "rb") as fh:
+                r = requests.post(TG + "/sendDocument", files={"document": (os.path.basename(arq), fh)},
+                                  data={"chat_id": ADMINS[0], "disable_notification": "true",
+                                        "caption": f"💾 Backup do bot {dia} (estado + histórico de preços)"},
+                                  timeout=120)
+            os.remove(arq)
+            if not r.ok:
+                raise RuntimeError(f"Telegram recusou o backup ({r.status_code})")
     except Exception as e:
         log(f"Backup falhou: {e!r}")
         para_admins(f"⚠️ Backup diário falhou: {html.escape(str(e)[:150])}")
@@ -1435,9 +1479,11 @@ def main():
             wa_tematicos()
             bf_posts()
             vigiar()
+            sinal_vida()
             erro_avisado = False
         except Exception as e:
             log(f"Falha no ciclo: {e!r}")
+            sinal_vida(falha=True)
             if not erro_avisado:
                 erro_avisado = True
                 para_admins(f"⚠️ Bot de ofertas: erro ao ler os dados ({html.escape(str(e)[:200])}).")
