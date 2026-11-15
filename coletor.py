@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import requests
 
-MIN = int(os.getenv("MIN_DESCONTO", "40"))
+MIN = int(os.getenv("MIN_DESCONTO", "35"))
 URG = int(os.getenv("URGENTE", "50"))
 OUT = sys.argv[1] if len(sys.argv) > 1 else "out"
 BASE = "https://www.amazon.com.br"
