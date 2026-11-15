@@ -354,6 +354,8 @@ def mercado_checar(asin, it):
                       "(mesmo modelo, capacidade, cor não importa, mesma quantidade);\n"
                       '"menor_preco": menor preço à vista em R$ do mesmo produto em outra loja (número) ou null;\n'
                       '"loja": nome dessa loja ou null;\n'
+                      '"precos": lista de até 4 lojas brasileiras com o MESMO produto, no formato '
+                      '[{"loja": "Magazine Luiza", "preco": 2399.90}], do mais barato para o mais caro;\n'
                       '"preco_tipico": preço normal desse produto no mercado em R$ (número) ou null;\n'
                       '"confianca": "alta", "media" ou "baixa".\n'
                       "Use apenas preços em reais (R$) de lojas brasileiras que aparecem nos resultados. "
@@ -368,6 +370,12 @@ def mercado_checar(asin, it):
             mn, tip = _num(j.get("menor_preco")), _num(j.get("preco_tipico"))
             de = _num(d) if d else None
             c.update(mn=mn, tip=tip, loja=(j.get("loja") or "")[:30])
+            lista = []
+            for x in (j.get("precos") or [])[:4]:
+                if isinstance(x, dict) and _num(x.get("preco")) and x.get("loja"):
+                    lista.append([str(x["loja"])[:25], _num(x["preco"])])
+            if lista:
+                c["precos"] = sorted(lista, key=lambda z: z[1])
             if not j.get("mesmo_produto") or j.get("confianca") == "baixa" or not (mn or tip):
                 c["v"] = "incerto"
             elif mn and mn < p * 0.9:
@@ -446,6 +454,15 @@ def wa_publicar(forcar=False):
                 continue
             aprovadas.append((a, it))
         todas = aprovadas
+        if WA_DESTAQUES and todas:
+            dest = [(a, it) for a, it in todas if econ(it) >= VALOR_ECON
+                    and (it.get("mercado") or {}).get("v") == "barato" and (it.get("mercado") or {}).get("mn")]
+            dest = sorted(dest, key=lambda x: -pontos(x[1]))[:WA_DESTAQUES]
+            for a, it in dest:
+                if wa_destaque(a, it):
+                    todas = [(b, x) for b, x in todas if b != a]
+                    stat("destaques")
+                    time.sleep(5)
     partes = [todas[k:k + WA_MAX] for k in range(0, len(todas), WA_MAX)]
     if WA_POSTS_MAX:
         partes = partes[:WA_POSTS_MAX]
@@ -479,6 +496,52 @@ def wa_publicar(forcar=False):
         stat("ofertas_wa", postadas)
         ST["wa_ult_post"] = time.time()
         ST["wa_alerta_parado"] = False
+
+
+WA_DESTAQUES = int(os.getenv("WA_DESTAQUES", "1"))  # posts de destaque (com prova de preço) por rodada
+
+
+def texto_destaque(asin, it):
+    c = it.get("mercado") or {}
+    de = f"~{brl(it['d'])}~ ➜ " if it["d"] else ""
+    precos = c.get("precos") or ([[c.get("loja") or "outra loja", c["mn"]]] if c.get("mn") else [])
+    linhas = "\n".join(f"• {loja}: {brl(p)}" for loja, p in precos)
+    quando = datetime.fromtimestamp(c.get("ts", time.time()), TZ).strftime("%d/%m às %H:%M")
+    rel = " ⚡ _relâmpago_" if it.get("rel") else ""
+    txt = (f"⭐ *DESTAQUE DO MOMENTO*{rel}\n━━━━━━━━━━━━━━\n\n"
+           f"*{curto(it['t'], 90)}*\n\n"
+           f"{de}*{brl(it['p'])}*  ({it['pc']}% OFF)\n"
+           f"💰 Economia de *{brl(econ(it))}*\n\n"
+           f"🔎 *Comparamos em lojas brasileiras:*\n{linhas}\n"
+           f"✅ *Na Amazon está mais barato*\n"
+           f"_(preços pesquisados em {quando}; podem mudar)_\n\n"
+           f"🛒 {BASE}/dp/{asin}?tag={AMAZON_TAG}")
+    if WA_CANAL_LINK:
+        txt += f"\n\n📲 *Gostou? Receba ofertas assim todo dia:*\n👉 Entre no canal Caça-Descontos: {WA_CANAL_LINK}"
+    return txt + AVISO_WA
+
+
+def wa_destaque(asin, it):
+    """Post só do produto: foto grande + preço + comparação com outras lojas."""
+    if not (WHAPI_TOKEN and WHAPI_PARA):
+        return False
+    txt = texto_destaque(asin, it)
+    ok = it.get("img") and whapi("image", {"to": WHAPI_PARA, "media": foto_url(it), "caption": txt})
+    if not ok:
+        ok = whapi("text", {"to": WHAPI_PARA, "body": txt, "typing_time": 0})
+    log(f"WhatsApp: destaque {asin} ok={ok}")
+    if ok:
+        with lock:
+            h = ST.get("hoje") or {}
+            dia = datetime.now(TZ).strftime("%Y-%m-%d")
+            if h.get("d") != dia:
+                h = {"d": dia, "itens": {}}
+            h["itens"][asin] = it
+            ST["hoje"] = h
+        stat("posts_wa")
+        stat("ofertas_wa")
+        ST["wa_ult_post"] = time.time()
+    return bool(ok)
 
 
 def wa_post(top, rotulo="", extra=0, ultimo=True, titulo=None, sub=""):
@@ -884,7 +947,7 @@ def texto_relatorio():
             f"✂️ Canceladas por excesso: {g('canceladas')}\n"
             f"🧹 Lixo filtrado: {g('fora_livro')} livros pouco avaliados · {g('fora_poucas_aval')} com poucas avaliações · "
             f"{g('fora_nota')} nota baixa · {g('fora_barato')} baratos demais · {g('fora_palavra')} capinhas/películas etc.\n"
-            f"💰 40-49% com economia grande: {g('valor')} encontradas · {g('valor_barrado')} descontos grandes barrados pela DeepSeek\n"
+            f"💰 {MIN_DESCONTO}-{URGENTE - 1}% com economia grande: {g('valor')} encontradas · {g('valor_barrado')} descontos grandes barrados pela DeepSeek · {g('destaques')} destaques\n"
             f"📲 WhatsApp: {g('posts_wa')} posts com {g('ofertas_wa')} ofertas · último post {ult_txt}\n"
             f"⚠️ Erros do Whapi: {g('erros_wa')}\n"
             f"🤖 Coletor: {'Amazon bloqueada ⚠️' if ST.get('bloqueado') else 'ok'}, {col_txt}"
@@ -1045,7 +1108,7 @@ def ciclo():
                 para_todos(m, canal=False)
             valor = [a for a in novos_com if econ(comuns[a]) >= VALOR_ECON]
             if valor:
-                log(f"{len(valor)} oferta(s) de 40-49% com economia >= R$ {VALOR_ECON:.0f}: WhatsApp na hora")
+                log(f"{len(valor)} oferta(s) de {MIN_DESCONTO}-{URGENTE - 1}% com economia >= R$ {VALOR_ECON:.0f}: WhatsApp na hora")
                 para_whatsapp([(a, {**comuns[a], "valor": True}) for a in valor])
                 stat("valor", len(valor))
             with lock:
