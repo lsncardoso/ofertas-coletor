@@ -261,7 +261,7 @@ def wa_item(n, asin, it):
         selo += "🏆 _menor preço em 30 dias_\n"
     if econ(it) >= 100:
         selo += f"💰 _economia de {brl(econ(it))}_\n"
-    if MERCADO_MODO == "filtrar" and (it.get("mercado") or {}).get("v") == "barato":
+    if (it.get("mercado") or {}).get("v") == "barato" and (MERCADO_MODO == "filtrar" or econ(it) >= VALOR_ECON):
         selo += "✅ _mais barato que nas outras lojas_\n"
     return (f"{NUM[n]} *{it['pc']}% OFF*{rel}\n"
             f"{curto(it['t'], 70)}\n"
@@ -429,6 +429,23 @@ def wa_publicar(forcar=False):
             if antes - len(todas):
                 log(f"Outras lojas: {antes - len(todas)} oferta(s) barradas")
         todas.sort(key=lambda x: -pontos(x[1]))
+    if DEEPSEEK_KEY and MERCADO_MODO != "desligado":
+        # descontos grandes (economia >= VALOR_ECON) SEMPRE passam pela DeepSeek, em qualquer modo
+        grandes = [(a, it) for a, it in todas if econ(it) >= VALOR_ECON][:30]
+        mercado_lote(grandes)
+        aprovadas = []
+        for a, it in todas:
+            v = (it.get("mercado") or {}).get("v")
+            if econ(it) >= VALOR_ECON and v in ("caro", "inflado"):
+                stat("valor_barrado")
+                log(f"Desconto grande barrado pela DeepSeek ({v}): {it['t'][:50]}")
+                continue
+            if it.get("valor") and v not in ("barato", "parecido"):
+                stat("valor_barrado")  # 40-49% só vai na hora se a DeepSeek confirmar o preço
+                log(f"40-49% sem confirmação da DeepSeek ({v}), não enviado: {it['t'][:50]}")
+                continue
+            aprovadas.append((a, it))
+        todas = aprovadas
     partes = [todas[k:k + WA_MAX] for k in range(0, len(todas), WA_MAX)]
     if WA_POSTS_MAX:
         partes = partes[:WA_POSTS_MAX]
@@ -867,7 +884,7 @@ def texto_relatorio():
             f"✂️ Canceladas por excesso: {g('canceladas')}\n"
             f"🧹 Lixo filtrado: {g('fora_livro')} livros pouco avaliados · {g('fora_poucas_aval')} com poucas avaliações · "
             f"{g('fora_nota')} nota baixa · {g('fora_barato')} baratos demais · {g('fora_palavra')} capinhas/películas etc.\n"
-            f"💰 40-49% com economia grande enviadas na hora: {g('valor')}\n"
+            f"💰 40-49% com economia grande: {g('valor')} encontradas · {g('valor_barrado')} descontos grandes barrados pela DeepSeek\n"
             f"📲 WhatsApp: {g('posts_wa')} posts com {g('ofertas_wa')} ofertas · último post {ult_txt}\n"
             f"⚠️ Erros do Whapi: {g('erros_wa')}\n"
             f"🤖 Coletor: {'Amazon bloqueada ⚠️' if ST.get('bloqueado') else 'ok'}, {col_txt}"
@@ -1029,7 +1046,7 @@ def ciclo():
             valor = [a for a in novos_com if econ(comuns[a]) >= VALOR_ECON]
             if valor:
                 log(f"{len(valor)} oferta(s) de 40-49% com economia >= R$ {VALOR_ECON:.0f}: WhatsApp na hora")
-                para_whatsapp([(a, comuns[a]) for a in valor])
+                para_whatsapp([(a, {**comuns[a], "valor": True}) for a in valor])
                 stat("valor", len(valor))
             with lock:
                 pend = ST.setdefault("canal_pend", {})
