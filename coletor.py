@@ -81,6 +81,10 @@ def item(p):
     vend = (p.get("dealDetails") or {}).get("percentClaimed")
     if isinstance(vend, (int, float)) and vend > 0:
         it["vend"] = int(vend)
+    bd = " ".join(f.get("text", "") for f in ((((p.get("dealBadge") or {}).get("messaging") or {})
+                                               .get("content") or {}).get("fragments") or [])).strip()
+    if bd and bd != "Oferta":
+        it["bdg"] = bd[:40]   # ex.: "Oferta Black Friday", cupons etc.
     rot = (((p.get("price") or {}).get("basisPrice") or {}).get("label") or "").strip()
     if rot and rot != "De:":
         it["rot"] = rot[:20]
@@ -93,7 +97,9 @@ def faixa(lo, hi, dep):
         j = api(lo, hi, dep, idx)
         ps = j.get("products") or []
         for p in ps:
-            if len(AMOSTRA) < 4 and p.get("price", {}).get("basisPrice"):
+            bdg = json.dumps(p.get("dealBadge") or {}, ensure_ascii=False).lower()
+            if (len(AMOSTRA) < 4 and p.get("price", {}).get("basisPrice")) or \
+                    (len(AMOSTRA) < 8 and ("cupom" in bdg or "coupon" in bdg)):
                 AMOSTRA.append(p)
             it = item(p)
             if it:
