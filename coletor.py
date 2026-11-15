@@ -62,8 +62,29 @@ def item(p):
         return None
     img = p.get("image") or {}
     foto = (img.get("hiRes") or {}).get("physicalId") or (img.get("lowRes") or {}).get("physicalId") or img.get("physicalId")
-    return {"t": p.get("title", "")[:120], "p": pr, "d": de, "pc": pc, "img": foto,
-            "rel": (p.get("dealDetails") or {}).get("type") == "LIGHTNING_DEAL"}
+    it = {"t": p.get("title", "")[:120], "p": pr, "d": de, "pc": pc, "img": foto,
+          "rel": (p.get("dealDetails") or {}).get("type") == "LIGHTNING_DEAL"}
+    # extras para os filtros do bot: avaliações, nota, categoria, quanto da oferta já saiu
+    rv = p.get("customerReviews") or {}
+    na = (rv.get("count") or {}).get("value")
+    it["na"] = int(na) if isinstance(na, (int, float)) else 0
+    nota = ((rv.get("rating") or {}).get("shortDisplayString") or "").replace(",", ".")
+    try:
+        it["nota"] = float(nota)
+    except ValueError:
+        pass
+    cat = (p.get("productCategory") or {})
+    if cat.get("symbol"):
+        it["cat"] = cat["symbol"]
+    if cat.get("productType"):
+        it["tp"] = cat["productType"]
+    vend = (p.get("dealDetails") or {}).get("percentClaimed")
+    if isinstance(vend, (int, float)) and vend > 0:
+        it["vend"] = int(vend)
+    rot = (((p.get("price") or {}).get("basisPrice") or {}).get("label") or "").strip()
+    if rot and rot != "De:":
+        it["rot"] = rot[:20]
+    return it
 
 
 def faixa(lo, hi, dep):
