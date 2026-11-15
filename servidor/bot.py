@@ -5,8 +5,8 @@
 - Cobre todas as ofertas da Amazon que aceitam filtro de desconto (todos os departamentos).
 - Quem manda /start no bot passa a receber; /stop para sair. Admins recebem avisos de erro e de inscritos.
 """
-import base64, html, json, logging, math, os, re, threading, time
-from datetime import datetime
+import base64, csv, html, io, json, logging, math, os, re, shutil, threading, time
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import requests
@@ -263,6 +263,7 @@ def wa_item(n, asin, it):
         selo += f"💰 _economia de {brl(econ(it))}_\n"
     if (it.get("mercado") or {}).get("v") == "barato" and (MERCADO_MODO == "filtrar" or econ(it) >= VALOR_ECON):
         selo += "✅ _mais barato que nas outras lojas_\n"
+    selo += selos_extra(it)
     return (f"{NUM[n]} *{it['pc']}% OFF*{rel}\n"
             f"{curto(it['t'], 70)}\n"
             f"{de}*{brl(it['p'])}*\n{selo}"
@@ -425,7 +426,8 @@ def wa_publicar(forcar=False):
     pend = ST.get("wa_pend") or {}
     if not pend:
         return
-    if not forcar and time.time() - ST.get("wa_ult", 0) < WA_INTERVALO_MIN * 60:
+    intervalo = WA_INTERVALO_BF if bf_fase()[0] == "semana" else WA_INTERVALO_MIN
+    if not forcar and time.time() - ST.get("wa_ult", 0) < intervalo * 60:
         return
     todas = sorted(pend.items(), key=lambda x: -pontos(x[1]))
     if DEEPSEEK_KEY and MERCADO_MODO in ("observar", "filtrar"):
@@ -486,6 +488,8 @@ def wa_publicar(forcar=False):
             h = {"d": dia, "itens": {}}
         h["itens"].update(dict(todas[:postadas]))
         ST["hoje"] = h
+    registrar_postados(todas[:postadas])
+    with lock:
         ST["wa_ult_top"] = dict(todas[:postadas] or todas[:WA_MAX])
         ST["wa_pend"] = {}
         ST["wa_ult"] = time.time()
@@ -538,6 +542,7 @@ def wa_destaque(asin, it):
                 h = {"d": dia, "itens": {}}
             h["itens"][asin] = it
             ST["hoje"] = h
+        registrar_postados([(asin, it)])
         stat("posts_wa")
         stat("ofertas_wa")
         ST["wa_ult_post"] = time.time()
@@ -587,6 +592,11 @@ def wa_post(top, rotulo="", extra=0, ultimo=True, titulo=None, sub=""):
     if WA_CANAL_LINK:  # rodapé em TODO post: quem receber encaminhado consegue entrar no canal
         aviso = f"\n\n📲 *Gostou? Receba ofertas assim todo dia:*\n👉 Entre no canal Caça-Descontos: {WA_CANAL_LINK}" + aviso
     corpo = "\n\n".join(wa_item(i, a, it) for i, (a, it) in enumerate(top))
+    fase, faltam = bf_fase()
+    if not titulo and fase == "semana":
+        titulo = f"🖤 *BLACK FRIDAY • {len(top)} OFERTAS*"
+    elif not titulo and fase == "esquenta" and not sub:
+        sub = f"⏳ Faltam {faltam} dia{'s' if faltam > 1 else ''} para a Black Friday"
     cab = (titulo or f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*") + rotulo + (f"\n_{sub}_" if sub else "")
     texto = (f"{cab}\n"
              f"━━━━━━━━━━━━━━\n\n{corpo}\n\n━━━━━━━━━━━━━━")
@@ -706,6 +716,17 @@ def ouvir_telegram():
                 continue
             txt = (m.get("text") or "").strip().lower()
             nome = nome_de(m)
+            if m.get("document") and chat in ADMINS:
+                threading.Thread(target=aprender_relatorio, args=(chat, m["document"]), daemon=True).start()
+                enviar(chat, "📥 Recebi o relatório. Analisando as vendas…")
+                continue
+            if txt.startswith("/aprendizado") and chat in ADMINS:
+                enviar(chat, texto_aprendizado())
+                continue
+            if txt.startswith("/blackfriday") and chat in ADMINS:
+                threading.Thread(target=bf_posts, kwargs={"forcar": True}, daemon=True).start()
+                enviar(chat, "🧪 Postando o post de Black Friday de hoje no WhatsApp…")
+                continue
             if txt.startswith("/start"):
                 novo = False
                 with lock:
@@ -832,6 +853,9 @@ def pontos(it):
     s += min(8, 2 * math.log10(1 + (it.get("na") or 0)))
     s += 5 if it.get("min30") else 0
     s += 3 if it.get("rel") else 0
+    s += min(6, (it.get("vend") or 0) / 12)          # oferta que já está saindo (% comprado)
+    s += 3 if "black friday" in (it.get("bdg") or "").lower() else 0
+    s += (ST.get("aprendizado") or {}).get(it.get("cat") or "", 0)
     if MERCADO_MODO == "filtrar" and (it.get("mercado") or {}).get("v") in ("caro", "inflado"):
         s -= 15
     return s
@@ -1000,6 +1024,9 @@ def texto_relatorio():
 def vigiar():
     agora = datetime.now(TZ)
     dia = agora.strftime("%Y-%m-%d")
+    if agora.hour == BACKUP_HORA and ST.get("backup_ult") != dia:
+        ST["backup_ult"] = dia
+        fazer_backup(dia)
     if agora.hour == RELATORIO_HORA and ST.get("relatorio_ult") != dia:
         ST["relatorio_ult"] = dia
         para_admins(texto_relatorio())
@@ -1009,6 +1036,216 @@ def vigiar():
         ST["wa_alerta_parado"] = True
         para_admins(f"⚠️ O canal do WhatsApp está há mais de {PARADO_HORAS:g}h sem post. "
                     "Pode ser falta de ofertas novas ou problema no Whapi. Mande /relatorio para ver os números.")
+
+
+# ---------- Black Friday ----------
+BLACK_FRIDAY = os.getenv("BLACK_FRIDAY", "2026-11-27")      # dia da Black Friday
+BF_ESQUENTA_DIAS = int(os.getenv("BF_ESQUENTA_DIAS", "12"))  # contagem regressiva começa N dias antes
+BF_SEMANA_ANTES = int(os.getenv("BF_SEMANA_ANTES", "4"))     # "semana da Black Friday" começa N dias antes...
+BF_SEMANA_DEPOIS = int(os.getenv("BF_SEMANA_DEPOIS", "3"))   # ...e vai até N dias depois (Cyber Monday)
+BF_HORA = int(os.getenv("BF_HORA", "10"))                    # post diário de esquenta / Black Friday (-1 desliga)
+WA_INTERVALO_BF = int(os.getenv("WA_INTERVALO_BF", "8"))     # intervalo entre posts na semana da Black Friday
+
+
+def bf_fase():
+    """('esquenta', dias que faltam) / ('semana', dias até/depois) / (None, None)."""
+    try:
+        d = (date.fromisoformat(BLACK_FRIDAY) - datetime.now(TZ).date()).days
+    except ValueError:
+        return None, None
+    if -BF_SEMANA_DEPOIS <= d <= BF_SEMANA_ANTES:
+        return "semana", d
+    if 0 < d <= BF_ESQUENTA_DIAS:
+        return "esquenta", d
+    return None, None
+
+
+def selos_extra(it):
+    s = ""
+    bdg = it.get("bdg") or ""
+    if "black friday" in bdg.lower():
+        s += "🖤 _Oferta Black Friday da Amazon_\n"
+    elif "cupom" in bdg.lower() or "coupon" in bdg.lower():
+        s += f"🎟️ _{bdg}_ (aplique na página)\n"
+    if (it.get("vend") or 0) >= 50:
+        s += f"🔥 _{it['vend']}% da oferta já vendida_\n"
+    return s
+
+
+def bf_posts(forcar=False):
+    """Post diário: esquenta (contagem regressiva) e, na semana, 'as melhores de hoje'."""
+    if not (WA_URL or WHAPI_TOKEN) or BF_HORA < 0:
+        return
+    fase, d = bf_fase()
+    agora = datetime.now(TZ)
+    dia = agora.strftime("%Y-%m-%d")
+    if not fase or (not forcar and (agora.hour != BF_HORA or ST.get("bf_ult") == dia)):
+        if forcar and not fase:
+            para_admins("Fora do período da Black Friday: nada a postar.")
+        return
+    ST["bf_ult"] = dia
+    todos = {**(baixar("comuns.json") or {}).get("itens", {}), **(baixar("urgentes.json") or {}).get("itens", {})}
+    cand = [(a, it) for a, it in todos.items() if not motivo_fora(it) and avaliar(a, it)]
+    top = sorted(cand, key=lambda x: -pontos(x[1]))[:WA_MAX]
+    if not top:
+        return
+    if fase == "esquenta":
+        titulo = f"⏳ *FALTAM {d} DIA{'S' if d > 1 else ''} PARA A BLACK FRIDAY*"
+        sub = "Esquenta: as melhores ofertas de agora"
+    elif d == 0:
+        titulo, sub = "🖤 *HOJE É BLACK FRIDAY!*", "As melhores ofertas da manhã"
+    elif d > 0:
+        titulo, sub = "🖤 *SEMANA BLACK FRIDAY*", f"Faltam {d} dia{'s' if d > 1 else ''} • as melhores de hoje"
+    else:
+        titulo, sub = "🖤 *BLACK FRIDAY: ÚLTIMOS DIAS*", "Ofertas que ainda estão valendo"
+    wa_post(top, titulo=titulo, sub=sub)
+    registrar_postados(top)
+    stat("posts_wa")
+    log(f"WhatsApp: post Black Friday ({fase}, {d}) com {len(top)} ofertas")
+    salvar()
+
+
+# ---------- aprendizado com o relatório de vendas da Amazon ----------
+def registrar_postados(itens):
+    with lock:
+        p = ST.setdefault("postados", {})
+        agora = time.time()
+        for a, it in itens:
+            p[a] = [it.get("cat") or "", agora]
+        for a in [a for a, (c, t) in p.items() if agora - t > 60 * 86400]:
+            del p[a]
+
+
+def nome_cat(c):
+    return (c or "?").replace("gl_", "").replace("_", " ")
+
+
+def ler_tabela(raw):
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            txt = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    linhas = [l for l in txt.splitlines() if l.strip()]
+    for i, l in enumerate(linhas[:15]):          # o cabeçalho é a linha que tem uma coluna ASIN
+        if "asin" in l.lower():
+            sep = max([",", ";", "\t"], key=l.count)
+            return list(csv.reader(io.StringIO("\n".join(linhas[i:])), delimiter=sep))
+    return None
+
+
+def aprender_relatorio(chat, doc):
+    try:
+        f = requests.get(TG + "/getFile", params={"file_id": doc["file_id"]}, timeout=30).json()["result"]
+        raw = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{f['file_path']}", timeout=60).content
+        nome = (doc.get("file_name") or "").lower()
+        if nome.endswith(".xlsx"):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True)
+                rows = [[("" if c is None else str(c)) for c in r] for r in wb.active.iter_rows(values_only=True)]
+                i = next(k for k, r in enumerate(rows[:15]) if any("asin" in c.lower() for c in r))
+                tab = rows[i:]
+            except ImportError:
+                enviar(chat, "Não consigo ler .xlsx aqui. Baixe o relatório como CSV e mande de novo.")
+                return
+        else:
+            tab = ler_tabela(raw)
+        if not tab:
+            enviar(chat, "Não achei a coluna ASIN nesse arquivo. Mande o relatório de <b>Pedidos</b> "
+                         "do Associados em CSV.")
+            return
+        cab = [c.strip().lower() for c in tab[0]]
+        ia = next(i for i, c in enumerate(cab) if "asin" in c)
+        iq = next((i for i, c in enumerate(cab) if c.startswith(("qtd", "quant", "itens envi", "itens ped"))), None)
+        ic = next((i for i, c in enumerate(cab) if "categ" in c), None)
+        vendas, cat_txt = {}, {}
+        for r in tab[1:]:
+            if len(r) <= ia or not re.fullmatch(r"[A-Z0-9]{10}", r[ia].strip()):
+                continue
+            try:
+                q = int(float((r[iq] if iq is not None and len(r) > iq else "1").replace(",", ".") or 1))
+            except ValueError:
+                q = 1
+            a = r[ia].strip()
+            vendas[a] = vendas.get(a, 0) + max(q, 1)
+            if ic is not None and len(r) > ic:
+                cat_txt[r[ic].strip()] = cat_txt.get(r[ic].strip(), 0) + max(q, 1)
+        if not vendas:
+            enviar(chat, "O arquivo não tem pedidos que eu consiga ler.")
+            return
+        # categoria de cada ASIN vendido: do que postamos, ou dos dados atuais do coletor
+        atuais = {**(baixar("comuns.json") or {}).get("itens", {}), **(baixar("urgentes.json") or {}).get("itens", {})}
+        post = ST.get("postados") or {}
+        vend_cat, post_cat = {}, {}
+        for a, (c, t) in post.items():
+            if c:
+                post_cat[c] = post_cat.get(c, 0) + 1
+        nossos = 0
+        for a, q in vendas.items():
+            c = (post.get(a) or [None])[0] or (atuais.get(a) or {}).get("cat")
+            if a in post:
+                nossos += q
+            if c:
+                vend_cat[c] = vend_cat.get(c, 0) + q
+        total_v, total_p = sum(vend_cat.values()) or 1, sum(post_cat.values()) or 1
+        media = total_v / total_p
+        bonus = {}
+        for c in set(vend_cat) | set(post_cat):
+            if post_cat.get(c, 0) < 10 and vend_cat.get(c, 0) < 3:
+                continue   # poucos dados nessa categoria: não mexe
+            taxa = (vend_cat.get(c, 0) + 0.5 * media) / (post_cat.get(c, 0) + 0.5)
+            bonus[c] = round(max(-6, min(8, 4 * math.log2(taxa / media))), 1) if media else 0
+        with lock:
+            ST["aprendizado"] = bonus
+            ST["aprendizado_info"] = {"quando": datetime.now(TZ).strftime("%d/%m %H:%M"), "itens": sum(vendas.values()),
+                                      "nossos": nossos, "vend_cat": vend_cat, "cat_txt": cat_txt}
+        salvar()
+        enviar(chat, texto_aprendizado())
+    except Exception as e:
+        log(f"aprendizado: {e!r}")
+        enviar(chat, f"Não consegui ler o relatório: {html.escape(str(e)[:200])}")
+
+
+def texto_aprendizado():
+    inf, b = ST.get("aprendizado_info"), ST.get("aprendizado") or {}
+    if not inf:
+        return ("📚 Ainda não aprendi com nenhum relatório.\n\nNo Associados da Amazon, baixe o relatório de "
+                "<b>Pedidos</b> (últimos 30 dias) em CSV e mande o arquivo aqui.")
+    mais = sorted(inf["vend_cat"].items(), key=lambda x: -x[1])[:6]
+    sobe = sorted([x for x in b.items() if x[1] > 0], key=lambda x: -x[1])[:5]
+    desce = sorted([x for x in b.items() if x[1] < 0], key=lambda x: x[1])[:5]
+    t = (f"📚 <b>Aprendizado</b> (relatório de {inf['quando']})\n"
+         f"🛒 {inf['itens']} itens vendidos · {inf['nossos']} eram ofertas que postamos\n\n"
+         "<b>O que mais vende:</b>\n" + "\n".join(f"• {nome_cat(c)}: {q}" for c, q in mais))
+    if sobe:
+        t += "\n\n⬆️ <b>Ganham prioridade:</b> " + ", ".join(f"{nome_cat(c)} (+{v:g})" for c, v in sobe)
+    if desce:
+        t += "\n⬇️ <b>Perdem prioridade:</b> " + ", ".join(f"{nome_cat(c)} ({v:g})" for c, v in desce)
+    return t
+
+
+# ---------- backup diário ----------
+BACKUP_HORA = int(os.getenv("BACKUP_HORA", "3"))
+BACKUP_DIAS = int(os.getenv("BACKUP_DIAS", "7"))
+
+
+def fazer_backup(dia):
+    try:
+        pasta = os.path.join("backups", dia)
+        os.makedirs(pasta, exist_ok=True)
+        with lock:
+            salvar()
+        for f in (STATE_FILE, PRECOS_FILE):
+            if os.path.exists(f):
+                shutil.copy2(f, pasta)
+        for velho in sorted(os.listdir("backups"))[:-BACKUP_DIAS]:
+            shutil.rmtree(os.path.join("backups", velho), ignore_errors=True)
+        log(f"Backup diário salvo em {pasta}")
+    except Exception as e:
+        log(f"Backup falhou: {e!r}")
+        para_admins(f"⚠️ Backup diário falhou: {html.escape(str(e)[:150])}")
 
 
 # ---------- ciclo principal ----------
@@ -1196,6 +1433,7 @@ def main():
             ciclo()
             wa_publicar()
             wa_tematicos()
+            bf_posts()
             vigiar()
             erro_avisado = False
         except Exception as e:
