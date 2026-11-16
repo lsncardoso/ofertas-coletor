@@ -807,6 +807,10 @@ def ouvir_telegram():
                 qual = "top" if txt.startswith("/testetop") else "achados"
                 threading.Thread(target=wa_tematicos, kwargs={"forcar": qual}, daemon=True).start()
                 enviar(chat, f"🧪 Postando o {'Top 5 do dia' if qual == 'top' else 'Achadinhos'} no WhatsApp…")
+            elif txt.startswith(("/bloquear", "/desbloquear")) and chat in ADMINS:
+                des = txt.startswith("/desbloquear")
+                pedido = (m.get("text") or "").split(None, 1)[1] if len((m.get("text") or "").split(None, 1)) > 1 else ""
+                threading.Thread(target=bloquear, args=(chat, pedido, des), daemon=True).start()
             elif txt.startswith("/postar") and chat in ADMINS:
                 pedido = (m.get("text") or "")[7:].strip()
                 threading.Thread(target=postar_manual, args=(chat, pedido), daemon=True).start()
@@ -866,6 +870,66 @@ PALAVRAS_FORA = [w.strip().lower() for w in os.getenv(
     "case para celular,adesivo,chaveiro,refil genérico").split(",") if w.strip()]
 
 
+# tipos de produto (categoria fina da Amazon) que nunca vão para o canal; dá para somar pelo Telegram com /bloquear
+TIPOS_FORA = [t.strip().upper() for t in os.getenv("TIPOS_FORA", (
+    "BALLOON,PARTY_SUPPLIES,BACKDROP,CELLULAR_PHONE_CASE,PORTABLE_ELECTRONIC_DEVICE_COVER,SCREEN_PROTECTOR,"
+    "TOILET_SEAT,SHOWERHEAD,SHOWER_ENCLOSURE,PLUMBING_FIXTURE,BUILDING_MATERIAL,CADDY,STORAGE_BOX,"
+    "ITEM_CONTAINER,STORAGE_RACK,KEYCHAIN,STICKER_DECAL,CAKE_TOPPER")).split(",") if t.strip()]
+
+
+def bloquear(chat, pedido, desfazer=False):
+    """/bloquear palavras -> bloqueia o TIPO de produto dessas ofertas (ex.: assento sanitário -> TOILET_SEAT)."""
+    pedido = pedido.strip().lower()
+    if not pedido:
+        tipos, pal = ST.get("tipos_fora") or [], ST.get("palavras_fora") or []
+        enviar(chat, "🚫 <b>Bloqueados pelo Telegram</b>\nTipos: " + (", ".join(tipos) or "nenhum")
+               + "\nPalavras: " + (", ".join(pal) or "nenhuma")
+               + "\n\nUse /bloquear nome do produto  ·  /desbloquear nome ou TIPO")
+        return
+    todos = {**(baixar("comuns.json") or {}).get("itens", {}), **(baixar("urgentes.json") or {}).get("itens", {})}
+    with lock:
+        tipos = ST.setdefault("tipos_fora", [])
+        pal = ST.setdefault("palavras_fora", [])
+        if desfazer:
+            alvo = pedido.upper()
+            if alvo in tipos:
+                tipos.remove(alvo)
+            elif pedido in pal:
+                pal.remove(pedido)
+            else:
+                ach = [it.get("tp") for it in todos.values() if pedido in it["t"].lower() and it.get("tp") in tipos]
+                if not ach:
+                    enviar(chat, "Não achei esse bloqueio. Mande /bloquear para ver a lista.")
+                    return
+                tipos.remove(max(set(ach), key=ach.count))
+            salvar()
+            enviar(chat, "✅ Desbloqueado.")
+            return
+        palavras = pedido.split()
+        achados = [it for it in todos.values() if all(w in it["t"].lower() for w in palavras) and it.get("tp")]
+        if achados:
+            cont = {}
+            for it in achados:
+                cont[it["tp"]] = cont.get(it["tp"], 0) + 1
+            tp = max(cont, key=cont.get)
+            if tp not in tipos:
+                tipos.append(tp)
+            ex = next(it["t"] for it in achados if it["tp"] == tp)
+            n = sum(1 for it in todos.values() if it.get("tp") == tp)
+            msg = (f"🚫 Bloqueei o tipo <b>{tp}</b> (ex.: {html.escape(ex[:60])}). "
+                   f"São {n} ofertas a menos agora. Para desfazer: /desbloquear {tp}")
+        else:
+            if pedido not in pal:
+                pal.append(pedido)
+            msg = f"🚫 Não achei esse produto agora, então bloqueei a expressão “{html.escape(pedido)}” nos títulos."
+        for k in ("wa_pend", "canal_pend"):
+            d = ST.get(k) or {}
+            for a in [a for a, it in d.items() if motivo_fora(it) == "palavra"]:
+                d.pop(a)
+    salvar()
+    enviar(chat, msg)
+
+
 # capas de celular em qualquer formato: "Capa para iPhone", "Capa Sanrio para iPhone 16", "Case Capinha Galaxy"...
 CAPA_CELULAR = re.compile(r"\b(capas?|capinhas?|case|cases|bumper)\b.{0,60}\b(iphone|galaxy|samsung|motorola|moto g|"
                           r"xiaomi|redmi|poco|celular|smartphone|magsafe)\b|\bprotetor de lente\b")
@@ -904,7 +968,9 @@ def motivo_fora(it):
     if "na" not in it:          # dado antigo, sem avaliações: deixa passar
         return None
     titulo = it["t"].lower()
-    if any(w in titulo for w in PALAVRAS_FORA) or CAPA_CELULAR.search(titulo):
+    if any(w in titulo for w in PALAVRAS_FORA + (ST.get("palavras_fora") or [])) or CAPA_CELULAR.search(titulo):
+        return "palavra"
+    if it.get("tp") and (it["tp"] in TIPOS_FORA or it["tp"] in (ST.get("tipos_fora") or [])):
         return "palavra"
     if float(it["p"]) < MIN_PRECO:
         return "barato"
