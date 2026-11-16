@@ -21,7 +21,7 @@ RESUMO_HORAS = os.getenv("RESUMO_HORAS", "todas")      # "todas" ou ex.: "9,12,1
 RESUMO_MAX = int(os.getenv("RESUMO_MAX", "0"))          # máx. de ofertas por resumo (0 = todas)
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
 CANAL = os.getenv("TELEGRAM_CANAL", "").strip()  # ex.: @cacadescontos40
-CANAL_HORAS = {int(h) for h in os.getenv("CANAL_HORAS", "9,12,15,18,21").split(",") if h.strip()}
+CANAL_HORAS = {int(h) for h in os.getenv("CANAL_HORAS", "8,10,12,14,16,18,20,22").split(",") if h.strip()}
 CANAL_MAX = int(os.getenv("CANAL_MAX", "10"))
 AVISO = "\n\n<i>Link de afiliado: como Associado da Amazon, ganho com compras qualificadas.</i>"
 AVISO_WA = "\n\n_Links de afiliado: como Associado da Amazon, ganho com compras qualificadas._"
@@ -865,6 +865,9 @@ MIN_AVAL_LIVRO = int(os.getenv("MIN_AVAL_LIVRO", "100"))   # livros precisam de 
 MIN_NOTA = float(os.getenv("MIN_NOTA", "4.0"))             # nota mínima (estrelas)
 MIN_PRECO = float(os.getenv("MIN_PRECO", "15"))            # nada abaixo disso
 VALOR_ECON = float(os.getenv("VALOR_ECON", "150"))         # 40-49% com economia >= isso vai na hora pro WhatsApp
+MIN_AVAL_MARCA = int(os.getenv("MIN_AVAL_MARCA", "30"))    # marcas conhecidas precisam de menos avaliações
+CAMPEAO_AVAL = int(os.getenv("CAMPEAO_AVAL", "1000"))      # campeões de venda: com tantas avaliações...
+CAMPEAO_PRECO = float(os.getenv("CAMPEAO_PRECO", "15"))     # ...podem custar a partir disso (abaixo de MIN_PRECO)
 PALAVRAS_FORA = [w.strip().lower() for w in os.getenv(
     "PALAVRAS_FORA", "capinha,capa para celular,capa celular,capa iphone,capa galaxy,película,pelicula,"
     "case para celular,adesivo,chaveiro,refil genérico").split(",") if w.strip()]
@@ -956,6 +959,16 @@ def marca(it):
     return m.group(1) if m else None
 
 
+COMPATIVEL = re.compile(r"compat[ií]vel|\bpara (o |a |os |as )?(iphone|ipad|apple|galaxy|samsung|xiaomi|redmi|motorola|"
+                        r"kindle|echo|alexa|fire tv|nespresso|dolce gusto|lego|jbl|sony|lg)\b")
+
+
+def marca_forte(it):
+    """Marca conhecida que é o fabricante (no começo do título), não acessório 'para iPhone'/'compatível com'."""
+    t = it["t"].lower()
+    return bool(MARCA_RE and MARCA_RE.search(t[:45]) and not COMPATIVEL.search(t))
+
+
 def econ(it):
     try:
         return max(0.0, float(it["d"] or 0) - float(it["p"]))
@@ -972,10 +985,11 @@ def motivo_fora(it):
         return "palavra"
     if it.get("tp") and (it["tp"] in TIPOS_FORA or it["tp"] in (ST.get("tipos_fora") or [])):
         return "palavra"
-    if float(it["p"]) < MIN_PRECO:
-        return "barato"
     livro = "book" in (it.get("cat") or "") or "BOOK" in (it.get("tp") or "")
-    if it["na"] < (MIN_AVAL_LIVRO if livro else MIN_AVAL):
+    if float(it["p"]) < MIN_PRECO and not (it["na"] >= CAMPEAO_AVAL and float(it["p"]) >= CAMPEAO_PRECO and not livro):
+        return "barato"
+    minimo = MIN_AVAL_LIVRO if livro else (min(MIN_AVAL, MIN_AVAL_MARCA) if marca_forte(it) else MIN_AVAL)
+    if it["na"] < minimo:
         return "livro" if livro else "poucas_aval"
     if it.get("nota") and it["nota"] < MIN_NOTA:
         return "nota"
@@ -1579,7 +1593,7 @@ def ciclo():
     chave = agora.strftime("%Y-%m-%d %H")
     pend = ST.get("canal_pend") or {}
     if (CANAL or WA_URL or WHAPI_TOKEN) and pend and agora.hour in CANAL_HORAS and ST.get("canal_ult") != chave:
-        top = sorted(pend, key=lambda a: -pend[a]["pc"])[:CANAL_MAX]
+        top = sorted(pend, key=lambda a: -pontos(pend[a]))[:CANAL_MAX]   # melhores pela pontuação (marca, economia...)
         titulo = f"🛒 <b>Top {len(top)} ofertas de {MIN_DESCONTO}% a {URGENTE - 1}%</b>"
         com = [(a, pend[a]) for a in top if pend[a].get("img")]
         if CANAL and FOTOS and com:
