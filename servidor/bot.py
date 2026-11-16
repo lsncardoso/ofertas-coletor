@@ -512,17 +512,55 @@ def texto_destaque(asin, it):
     linhas = "\n".join(f"• {loja}: {brl(p)}" for loja, p in precos)
     quando = datetime.fromtimestamp(c.get("ts", time.time()), TZ).strftime("%d/%m às %H:%M")
     rel = " ⚡ _relâmpago_" if it.get("rel") else ""
+    if c.get("v") == "barato" and linhas:
+        prova = (f"🔎 *Comparamos em lojas brasileiras:*\n{linhas}\n"
+                 f"✅ *Na Amazon está mais barato*\n"
+                 f"_(preços pesquisados em {quando}; podem mudar)_\n\n")
+    else:
+        prova = f"_🕒 Preço de {datetime.now(TZ).strftime('%d/%m às %H:%M')}; pode mudar._\n\n"
+    selo = selos_extra(it)
     txt = (f"⭐ *DESTAQUE DO MOMENTO*{rel}\n━━━━━━━━━━━━━━\n\n"
            f"*{curto(it['t'], 90)}*\n\n"
            f"{de}*{brl(it['p'])}*  ({it['pc']}% OFF)\n"
-           f"💰 Economia de *{brl(econ(it))}*\n\n"
-           f"🔎 *Comparamos em lojas brasileiras:*\n{linhas}\n"
-           f"✅ *Na Amazon está mais barato*\n"
-           f"_(preços pesquisados em {quando}; podem mudar)_\n\n"
+           f"💰 Economia de *{brl(econ(it))}*\n{selo}\n"
+           f"{prova}"
            f"🛒 {BASE}/dp/{asin}?tag={AMAZON_TAG}")
     if WA_CANAL_LINK:
         txt += f"\n\n📲 *Gostou? Receba ofertas assim todo dia:*\n👉 Entre no canal Caça-Descontos: {WA_CANAL_LINK}"
     return txt + AVISO_WA
+
+
+def postar_manual(chat, pedido):
+    """/postar ASIN  ou  /postar palavras do título: posta a melhor oferta encontrada como destaque."""
+    try:
+        todos = {**(baixar("comuns.json") or {}).get("itens", {}), **(baixar("urgentes.json") or {}).get("itens", {})}
+        m = re.search(r"\b([A-Z0-9]{10})\b", pedido) or re.search(r"/dp/([A-Z0-9]{10})", pedido)
+        if m and m.group(1) in todos:
+            cand = [(m.group(1), todos[m.group(1)])]
+        else:
+            palavras = [w for w in pedido.lower().split() if w]
+            if not palavras:
+                enviar(chat, "Use: /postar ASIN  ou  /postar palavras do produto (ex.: /postar polo aeropostale masculina)")
+                return
+            cand = sorted([(a, it) for a, it in todos.items() if all(w in it["t"].lower() for w in palavras)],
+                          key=lambda x: (-x[1]["pc"], -(x[1].get("na") or 0)))
+        if not cand:
+            enviar(chat, "Não achei essa oferta nos dados de agora (precisa estar com 35%+ de desconto).")
+            return
+        a, it = cand[0]
+        if DEEPSEEK_KEY:
+            mercado_lote([(a, it)])
+        ok = wa_destaque(a, it)
+        v = (it.get("mercado") or {}).get("v", "sem comparação")
+        enviar(chat, (f"✅ Postado no canal: {html.escape(it['t'][:80])} ({it['pc']}% OFF, {brl(it['p'])}). "
+                      f"Comparação com outras lojas: {v}.") if ok else "⚠️ O Whapi não aceitou o post.")
+        if ok:
+            with lock:
+                ST.setdefault("alertas", {})[a] = [float(it["p"]), time.time()]
+            salvar()
+    except Exception as e:
+        log(f"postar manual: {e!r}")
+        enviar(chat, f"Falhou: {html.escape(str(e)[:200])}")
 
 
 def wa_destaque(asin, it):
@@ -769,6 +807,10 @@ def ouvir_telegram():
                 qual = "top" if txt.startswith("/testetop") else "achados"
                 threading.Thread(target=wa_tematicos, kwargs={"forcar": qual}, daemon=True).start()
                 enviar(chat, f"🧪 Postando o {'Top 5 do dia' if qual == 'top' else 'Achadinhos'} no WhatsApp…")
+            elif txt.startswith("/postar") and chat in ADMINS:
+                pedido = (m.get("text") or "")[7:].strip()
+                threading.Thread(target=postar_manual, args=(chat, pedido), daemon=True).start()
+                enviar(chat, "🧪 Procurando a oferta para postar como destaque…")
             elif txt.startswith("/testedestaque") and chat in ADMINS:
                 threading.Thread(target=teste_destaque, args=(chat,), daemon=True).start()
                 enviar(chat, "🧪 Montando um destaque de teste com uma oferta real (leva até 1 min)…")
@@ -829,6 +871,27 @@ CAPA_CELULAR = re.compile(r"\b(capas?|capinhas?|case|cases|bumper)\b.{0,60}\b(ip
                           r"xiaomi|redmi|poco|celular|smartphone|magsafe)\b|\bprotetor de lente\b")
 
 
+MARCAS = [m.strip().lower() for m in os.getenv("MARCAS", (
+    "aeropostale,nike,adidas,puma,mizuno,asics,olympikus,new balance,under armour,levi's,levis,lacoste,"
+    "tommy hilfiger,calvin klein,ralph lauren,polo ralph lauren,hering,colcci,oakley,ray-ban,havaianas,"
+    "crocs,vans,converse,timberland,samsonite,apple,samsung,xiaomi,motorola,lg,sony,jbl,philips,bose,"
+    "electrolux,brastemp,consul,mondial,britânia,britania,oster,arno,walita,cadence,tramontina,stanley,"
+    "owala,bosch,makita,dewalt,black+decker,black & decker,vonder,kärcher,karcher,wap,lego,mattel,hasbro,"
+    "barbie,hot wheels,logitech,redragon,hyperx,razer,kingston,sandisk,intelbras,dell,lenovo,asus,acer,hp,"
+    "canon,epson,l'oréal,loreal,wella,nivea,natura,boticário,boticario,dove,gillette,oral-b,colgate,pampers,"
+    "huggies,kindle,echo,fire tv,alexa,garmin,amazfit,anker,baseus,ugreen,multilaser,positivo,nespresso,"
+    "dolce gusto,tefal,rochedo,brinox,le creuset,kitchenaid,weber,coleman,nautika,mormaii,speedo")).split(",")
+    if m.strip()]
+MARCA_BONUS = float(os.getenv("MARCA_BONUS", "10"))
+MARCA_RE = re.compile(r"(?<![\w])(" + "|".join(re.escape(m) for m in sorted(MARCAS, key=len, reverse=True))
+                      + r")(?![\w])") if MARCAS else None
+
+
+def marca(it):
+    m = MARCA_RE.search(it["t"].lower()) if MARCA_RE else None
+    return m.group(1) if m else None
+
+
 def econ(it):
     try:
         return max(0.0, float(it["d"] or 0) - float(it["p"]))
@@ -859,6 +922,7 @@ def pontos(it):
     s += min(8, 2 * math.log10(1 + (it.get("na") or 0)))
     s += 5 if it.get("min30") else 0
     s += 3 if it.get("rel") else 0
+    s += MARCA_BONUS if marca(it) else 0
     s += min(6, (it.get("vend") or 0) / 12)          # oferta que já está saindo (% comprado)
     s += 3 if "black friday" in (it.get("bdg") or "").lower() else 0
     s += (ST.get("aprendizado") or {}).get(it.get("cat") or "", 0)
