@@ -824,6 +824,11 @@ PALAVRAS_FORA = [w.strip().lower() for w in os.getenv(
     "case para celular,adesivo,chaveiro,refil genérico").split(",") if w.strip()]
 
 
+# capas de celular em qualquer formato: "Capa para iPhone", "Capa Sanrio para iPhone 16", "Case Capinha Galaxy"...
+CAPA_CELULAR = re.compile(r"\b(capas?|capinhas?|case|cases|bumper)\b.{0,60}\b(iphone|galaxy|samsung|motorola|moto g|"
+                          r"xiaomi|redmi|poco|celular|smartphone|magsafe)\b|\bprotetor de lente\b")
+
+
 def econ(it):
     try:
         return max(0.0, float(it["d"] or 0) - float(it["p"]))
@@ -836,7 +841,7 @@ def motivo_fora(it):
     if "na" not in it:          # dado antigo, sem avaliações: deixa passar
         return None
     titulo = it["t"].lower()
-    if any(w in titulo for w in PALAVRAS_FORA):
+    if any(w in titulo for w in PALAVRAS_FORA) or CAPA_CELULAR.search(titulo):
         return "palavra"
     if float(it["p"]) < MIN_PRECO:
         return "barato"
