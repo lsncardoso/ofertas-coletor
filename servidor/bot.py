@@ -310,40 +310,51 @@ def foto_produto(it, caixa):
 
 
 def montar_colagem(itens):
-    """Colagem com as fotos numeradas (até 3 colunas), no visual Temporada de caça. Devolve o caminho do JPG."""
+    """Arte QUADRADA (1080x1080, o WhatsApp mostra inteira sem cortar) com as fotos numeradas.
+    1 oferta vira o card individual. Devolve o caminho do JPG ou None."""
     try:
         from PIL import Image, ImageDraw
     except ImportError:
         log("Pillow não instalado: WhatsApp vai só com texto")
         return None
-    lado, gap, topo, rodape = 420, 16, 112, 64
-    cols = min(3, len(itens))
-    linhas = (len(itens) + cols - 1) // cols
-    W = cols * lado + (cols + 1) * gap
-    H = topo + linhas * lado + (linhas + 1) * gap + rodape
-    tela = Image.new("RGB", (W, H), CREME)
+    if len(itens) == 1:
+        card = montar_card(*itens[0])
+        if card:
+            import shutil
+            shutil.copy(card, os.path.abspath("wa_colagem.jpg"))
+            return os.path.abspath("wa_colagem.jpg")
+    n = len(itens)
+    cols, linhas = {1: (1, 1), 2: (2, 1), 3: (3, 1), 4: (2, 2)}.get(n, (3, (n + 2) // 3))
+    W = 1080
+    gap, topo, rodape = 16, 104, 60
+    cw = (W - (cols + 1) * gap) // cols
+    ch = (W - topo - rodape - (linhas + 1) * gap) // linhas
+    tela = Image.new("RGB", (W, W), CREME)
     d = ImageDraw.Draw(tela)
     d.rectangle([0, 0, W, topo], fill=CAFE)
-    pilula(d, gap + 6, 30, 19, fundo=(68, 48, 38))
-    marca_texto(d, (W - gap - 6, 72), 40, cor=CREME, anchor="rs")
+    pilula(d, gap + 6, 30, 18, fundo=(68, 48, 38))
+    marca_texto(d, (W - gap - 6, 68), 38, cor=CREME, anchor="rs")
+    menor = min(cw, ch)
+    alt_tag = max(40, int(menor * 0.15))
+    num = max(36, int(menor * 0.12))
     ok = 0
     for i, (asin, it) in enumerate(itens):
-        x = gap + (i % cols) * (lado + gap)
-        y = topo + gap + (i // cols) * (lado + gap)
-        d.rounded_rectangle([x, y, x + lado, y + lado], radius=26, fill=(255, 255, 255))
+        x = gap + (i % cols) * (cw + gap)
+        y = topo + gap + (i // cols) * (ch + gap)
+        d.rounded_rectangle([x, y, x + cw, y + ch], radius=24, fill=(255, 255, 255))
         try:
-            img = foto_produto(it, (lado - 70, lado - 90))
-            tela.paste(img, (x + (lado - img.width) // 2, y + 20 + (lado - 40 - img.height) // 2))
+            img = foto_produto(it, (cw - 40, ch - alt_tag - 30))
+            tela.paste(img, (x + (cw - img.width) // 2, y + 14 + (ch - alt_tag - 20 - img.height) // 2))
             ok += 1
         except Exception as e:
             log(f"Foto {asin} falhou na colagem: {e}")
-        d.ellipse([x + 12, y + 12, x + 64, y + 64], fill=CAFE)
-        d.text((x + 38, y + 38), str(i + 1), fill=CREME, font=fonte(30), anchor="mm")
-        tag = etiqueta_img(f"-{it['pc']}%", 62)
-        tela.paste(tag, (x + lado - tag.width - 8, y + lado - tag.height - 8), tag)
+        d.ellipse([x + 10, y + 10, x + 10 + num, y + 10 + num], fill=CAFE)
+        d.text((x + 10 + num // 2, y + 10 + num // 2), str(i + 1), fill=CREME, font=fonte(int(num * 0.58)), anchor="mm")
+        tag = etiqueta_img(f"-{it['pc']}%", alt_tag)
+        tela.paste(tag, (x + cw - tag.width - 6, y + ch - tag.height - 6), tag)
     if not ok:
         return None
-    d.text((gap + 6, H - rodape // 2), f"Caçada de {datetime.now(TZ).strftime('%d/%m às %H:%M')} · preços podem mudar",
+    d.text((gap + 6, W - rodape // 2), f"Caçada de {datetime.now(TZ).strftime('%d/%m às %H:%M')} · preços podem mudar",
            fill=MARROM, font=fonte(22, 500), anchor="lm")
     caminho = os.path.abspath("wa_colagem.jpg")
     tela.save(caminho, "JPEG", quality=88)
@@ -833,7 +844,7 @@ def wa_post(top, rotulo="", extra=0, ultimo=True, titulo=None, sub=""):
         titulo = f"🖤 *BLACK FRIDAY • {len(top)} OFERTAS*"
     elif not titulo and fase == "esquenta" and not sub:
         sub = f"⏳ Faltam {faltam} dia{'s' if faltam > 1 else ''} para a Black Friday"
-    cab = (titulo or f"🟢 *TEMPORADA DE CAÇA: ABERTA*\n🎯 *{len(top)} ofertas caçadas agora*") + rotulo + (f"\n_{sub}_" if sub else "")
+    cab = (titulo or f"🟢 *TEMPORADA DE CAÇA: ABERTA*\n🎯 *{len(top)} oferta{'s' if len(top) > 1 else ''} caçada{'s' if len(top) > 1 else ''} agora*") + rotulo + (f"\n_{sub}_" if sub else "")
     texto = (f"{cab}\n"
              f"━━━━━━━━━━━━━━\n\n{corpo}\n\n━━━━━━━━━━━━━━")
     if extra > 0:
