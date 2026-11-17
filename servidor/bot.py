@@ -441,6 +441,99 @@ def montar_card(asin, it):
     return caminho
 
 
+def montar_status(asin, it):
+    """Arte vertical (1080x1920) para o Status do WhatsApp, no visual Temporada de caça."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    W, H = 1080, 1920
+    tela = Image.new("RGB", (W, H), CREME)
+    d = ImageDraw.Draw(tela)
+    f = fonte(30, 700)
+    pw = int(f.getlength("TEMPORADA DE CAÇA: ABERTA") + 30 * 3.2)
+    pilula(d, (W - pw) // 2, 110, 30)
+    fm = fonte(64)
+    larg = fm.getlength("caça-descontos")
+    logo = logo_img(84)
+    x0 = (W - larg - 104) / 2
+    tela.paste(logo, (int(x0), 214), logo)
+    marca_texto(d, (x0 + 104, 278), 64)
+    caixa = [70, 350, W - 70, 1160]
+    d.rounded_rectangle(caixa, radius=44, fill=(255, 255, 255))
+    try:
+        img = foto_produto(it, (caixa[2] - caixa[0] - 140, caixa[3] - caixa[1] - 140))
+        tela.paste(img, ((W - img.width) // 2, caixa[1] + (caixa[3] - caixa[1] - img.height) // 2))
+    except Exception as e:
+        log(f"Foto {asin} falhou no status: {e}")
+        return None
+    tag = etiqueta_img(f"-{it['pc']}%", 150, rot=10)
+    tela.paste(tag, (caixa[2] - tag.width + 30, caixa[1] - 60), tag)
+    ft = fonte(50, 700)
+    y = 1240
+    for l in quebrar(it["t"], ft, W - 140, linhas=3):
+        d.text((W / 2, y), l, fill=CAFE, font=ft, anchor="ms")
+        y += 64
+    y += 20
+    if it.get("d"):
+        fd = fonte(44, 500)
+        de = "de " + brl(it["d"]) + " por"
+        d.text((W / 2, y + 30), de, fill=MARROM, font=fd, anchor="ms")
+        dl = fd.getlength(brl(it["d"]))
+        xs = W / 2 - fd.getlength(de) / 2 + fd.getlength("de ")
+        d.line([xs, y + 15, xs + dl, y + 15], fill=MARROM, width=4)
+        y += 50
+    d.text((W / 2, y + 120), brl(it["p"]), fill=TOMATE, font=fonte(140), anchor="ms")
+    if it.get("min30"):
+        fc = fonte(30, 700)
+        c = "Menor preço em 30 dias"
+        w = int(fc.getlength(c) + 56)
+        d.rounded_rectangle([(W - w) // 2, y + 160, (W + w) // 2, y + 220], radius=30, fill=CAFE)
+        d.text((W / 2, y + 190), c, fill=CREME, font=fc, anchor="mm")
+    d.rounded_rectangle([90, H - 200, W - 90, H - 60], radius=70, fill=TOMATE)
+    d.text((W / 2, H - 150), "Ofertas assim todo dia no canal", fill=CREME, font=fonte(42), anchor="mm")
+    d.text((W / 2, H - 98), "link na legenda · entre grátis", fill=CREME, font=fonte(28, 700), anchor="mm")
+    caminho = os.path.abspath("status_oferta.jpg")
+    tela.save(caminho, "JPEG", quality=92)
+    return caminho
+
+
+def arte_status(chat, pedido):
+    """/arte ASIN  ou  /arte palavras: manda no Telegram a arte vertical do Status + a legenda pronta."""
+    try:
+        todos = {**(ST.get("ultimos") or {}),  # ofertas já postadas (mesmo que tenham saído dos dados)
+                 **(baixar("comuns.json") or {}).get("itens", {}), **(baixar("urgentes.json") or {}).get("itens", {})}
+        m = re.search(r"\b([A-Z0-9]{10})\b", pedido)
+        if m and m.group(1) in todos:
+            cand = [(m.group(1), todos[m.group(1)])]
+        else:
+            palavras = [w for w in pedido.lower().split() if w]
+            if not palavras:
+                enviar(chat, "Use: /arte ASIN  ou  /arte palavras do produto (ex.: /arte pampers premium g)")
+                return
+            cand = sorted([(a, it) for a, it in todos.items() if all(w in it["t"].lower() for w in palavras)],
+                          key=lambda x: (-x[1]["pc"], -(x[1].get("na") or 0)))
+        if not cand:
+            enviar(chat, "Não achei essa oferta nos dados de agora (precisa estar com 35%+ de desconto).")
+            return
+        a, it = cand[0]
+        arq = montar_status(a, it)
+        if not arq:
+            enviar(chat, "Não consegui baixar a foto do produto para montar a arte.")
+            return
+        leg = ((f"📲 Entre no canal Caça-Descontos (grátis): {WA_CANAL_LINK}\n\n" if WA_CANAL_LINK else "")
+               + f"🎯 {it['pc']}% OFF · {it['t'][:90]}\n"
+               + (f"De {brl(it['d'])} por {brl(it['p'])}\n" if it.get("d") else f"Por {brl(it['p'])}\n")
+               + f"🛒 {BASE}/dp/{a}?tag={AMAZON_TAG}")
+        with open(arq, "rb") as fh:
+            requests.post(TG + "/sendDocument", data={"chat_id": chat, "caption": "Arte para o Status (abra e salve)"},
+                          files={"document": ("status.jpg", fh)}, timeout=60)
+        enviar(chat, "Legenda pronta para copiar:\n\n" + html.escape(leg))
+    except Exception as e:
+        log(f"arte status: {e!r}")
+        enviar(chat, f"Falhou: {html.escape(str(e)[:200])}")
+
+
 def curto(t, n):
     return t if len(t) <= n else t[:n].rsplit(" ", 1)[0] + "…"
 
@@ -1024,6 +1117,10 @@ def ouvir_telegram():
                 pedido = (m.get("text") or "")[7:].strip()
                 threading.Thread(target=postar_manual, args=(chat, pedido), daemon=True).start()
                 enviar(chat, "🧪 Procurando a oferta para postar como destaque…")
+            elif txt.startswith("/arte") and chat in ADMINS:
+                pedido = (m.get("text") or "")[5:].strip()
+                threading.Thread(target=arte_status, args=(chat, pedido), daemon=True).start()
+                enviar(chat, "🎨 Montando a arte para o Status…")
             elif txt.startswith("/testedestaque") and chat in ADMINS:
                 threading.Thread(target=teste_destaque, args=(chat,), daemon=True).start()
                 enviar(chat, "🧪 Montando um destaque de teste com uma oferta real (leva até 1 min)…")
@@ -1473,8 +1570,12 @@ def registrar_postados(itens):
     with lock:
         p = ST.setdefault("postados", {})
         agora = time.time()
+        u = ST.setdefault("ultimos", {})
         for a, it in itens:
             p[a] = [it.get("cat") or "", agora]
+            u[a] = {k: it[k] for k in ("t", "p", "d", "pc", "img", "min30") if k in it}  # para o /arte
+        for a in list(u)[:-60]:
+            del u[a]
         for a in [a for a, (c, t) in p.items() if agora - t > 60 * 86400]:
             del p[a]
 
