@@ -197,53 +197,236 @@ def para_whatsapp(itens, titulo=None):
             pend[a] = it
 
 
-def montar_colagem(itens):
-    """Colagem com as fotos numeradas (até 3 colunas). Devolve o caminho do JPG ou None."""
+# ---------- identidade visual "Temporada de caça" (imagens dos posts) ----------
+FONTE_ARQ = os.getenv("FONTE", "DMSans.ttf")   # DM Sans (variável); sem ela usa a fonte padrão
+TOMATE, TOMATE_ESC, CAFE = (228, 87, 46), (184, 67, 31), (45, 30, 23)
+CREME, VERDE, MARROM = (251, 243, 230), (61, 220, 132), (107, 82, 70)
+
+
+def fonte(px, peso=900):
+    from PIL import ImageFont
     try:
-        from io import BytesIO
-        from PIL import Image, ImageDraw, ImageFont
+        f = ImageFont.truetype(FONTE_ARQ, px)
+        try:
+            f.set_variation_by_axes([min(40, max(9, px)), peso])
+        except Exception:
+            pass
+        return f
+    except Exception:
+        try:
+            return ImageFont.load_default(size=px)
+        except TypeError:
+            return ImageFont.load_default()
+
+
+def etiqueta_img(txt, alt, fundo=None, rot=8):
+    """Etiqueta de preço (vermelha, ponta redonda, furo-mira) com o texto; devolve RGBA já girada."""
+    from PIL import Image, ImageDraw
+    f = fonte(int(alt * 0.5))
+    larg_txt = int(f.getlength(txt))
+    r = alt // 2
+    w = larg_txt + int(alt * 0.45) + int(alt * 0.95)
+    im = Image.new("RGBA", (w + 4, alt + 4), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle([0, 0, w // 2, alt], radius=max(6, alt // 8), fill=TOMATE)
+    d.rectangle([w // 4, 0, w - r, alt], fill=TOMATE)
+    d.ellipse([w - 2 * r, 0, w, alt], fill=TOMATE)
+    cx, cy, rr = w - int(r * 0.78), alt // 2, max(4, int(alt * 0.13))
+    d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], outline=CREME, width=max(2, alt // 26))
+    pr = max(2, rr // 3)
+    d.ellipse([cx - pr, cy - pr, cx + pr, cy + pr], fill=CREME)
+    d.text((int(alt * 0.3) + larg_txt // 2, alt // 2), txt, fill=CREME, font=f, anchor="mm")
+    return im.rotate(rot, expand=True, resample=Image.BICUBIC)
+
+
+def logo_img(lado, circulo=True):
+    """O símbolo: etiqueta creme com % e furo-mira, inclinada, sobre o vermelho."""
+    from PIL import Image, ImageDraw
+    S = 1200
+    k = S / 300
+    base = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(base)
+    if circulo:
+        d.ellipse([0, 0, S - 1, S - 1], fill=TOMATE)
+    else:
+        d.rectangle([0, 0, S, S], fill=TOMATE)
+    tag = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    t = ImageDraw.Draw(tag)
+
+    def corpo(dx, dy, cor):
+        t.rounded_rectangle([(54 + dx) * k, (95 + dy) * k, (120 + dx) * k, (205 + dy) * k], radius=16 * k, fill=cor)
+        t.rectangle([(90 + dx) * k, (95 + dy) * k, (191 + dx) * k, (205 + dy) * k], fill=cor)
+        t.ellipse([(136 + dx) * k, (95 + dy) * k, (246 + dx) * k, (205 + dy) * k], fill=cor)
+    corpo(5, 7, TOMATE_ESC)
+    corpo(0, 0, CREME)
+    cx, cy = 203 * k, 150 * k
+    t.ellipse([cx - 19 * k, cy - 19 * k, cx + 19 * k, cy + 19 * k], outline=TOMATE, width=int(6 * k))
+    t.ellipse([cx - 5.5 * k, cy - 5.5 * k, cx + 5.5 * k, cy + 5.5 * k], fill=TOMATE)
+    for x1, y1, x2, y2 in ((203, 122, 203, 134), (203, 166, 203, 178), (175, 150, 187, 150), (219, 150, 231, 150)):
+        t.line([x1 * k, y1 * k, x2 * k, y2 * k], fill=TOMATE, width=int(6 * k))
+    t.text((118 * k, 184 * k), "%", fill=TOMATE, font=fonte(int(98 * k)), anchor="ms")
+    tag = tag.rotate(18, center=(S / 2, S / 2), resample=Image.BICUBIC)
+    if circulo:
+        m = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(m).ellipse([0, 0, S - 1, S - 1], fill=255)
+        tag.putalpha(Image.composite(tag.getchannel("A"), Image.new("L", (S, S), 0), m))
+    base.alpha_composite(tag)
+    return base.resize((lado, lado), Image.LANCZOS)
+
+
+def marca_texto(d, xy, px, cor=CAFE, destaque=TOMATE, anchor="ls"):
+    """Escreve 'caça-descontos' com o ç em destaque. anchor ls (esquerda) ou rs (direita)."""
+    f = fonte(px)
+    partes = [("ca", cor), ("ç", destaque), ("a-descontos", cor)]
+    total = sum(f.getlength(p) for p, _ in partes)
+    x, y = xy
+    if anchor == "rs":
+        x -= total
+    for p, c in partes:
+        d.text((x, y), p, fill=c, font=f, anchor="ls")
+        x += f.getlength(p)
+
+
+def pilula(d, x, y, px, txt="TEMPORADA DE CAÇA: ABERTA", fundo=CAFE, cor=CREME):
+    """Selo 'ao vivo' com bolinha verde. Devolve a largura usada."""
+    f = fonte(px, 700)
+    h = int(px * 2.1)
+    w = int(f.getlength(txt) + px * 3.2)
+    d.rounded_rectangle([x, y, x + w, y + h], radius=h // 2, fill=fundo)
+    b = int(px * 0.32)
+    bx, by = x + int(px * 1.15), y + h // 2
+    d.ellipse([bx - b, by - b, bx + b, by + b], fill=VERDE)
+    d.text((x + int(px * 1.9), by), txt, fill=cor, font=f, anchor="lm")
+    return w
+
+
+def foto_produto(it, caixa):
+    from io import BytesIO
+    from PIL import Image
+    r = requests.get(foto_url(it), timeout=15)
+    img = Image.open(BytesIO(r.content)).convert("RGB")
+    img.thumbnail(caixa, Image.LANCZOS)
+    return img
+
+
+def montar_colagem(itens):
+    """Colagem com as fotos numeradas (até 3 colunas), no visual Temporada de caça. Devolve o caminho do JPG."""
+    try:
+        from PIL import Image, ImageDraw
     except ImportError:
         log("Pillow não instalado: WhatsApp vai só com texto")
         return None
-    lado, gap = 420, 12
+    lado, gap, topo, rodape = 420, 16, 112, 64
     cols = min(3, len(itens))
     linhas = (len(itens) + cols - 1) // cols
-    W, H = cols * lado + (cols + 1) * gap, linhas * lado + (linhas + 1) * gap
-    tela = Image.new("RGB", (W, H), (245, 245, 245))
+    W = cols * lado + (cols + 1) * gap
+    H = topo + linhas * lado + (linhas + 1) * gap + rodape
+    tela = Image.new("RGB", (W, H), CREME)
     d = ImageDraw.Draw(tela)
-    try:
-        fonte = ImageFont.load_default(size=40)
-        fonte_p = ImageFont.load_default(size=34)
-    except TypeError:
-        fonte = fonte_p = ImageFont.load_default()
+    d.rectangle([0, 0, W, topo], fill=CAFE)
+    pilula(d, gap + 6, 30, 19, fundo=(68, 48, 38))
+    marca_texto(d, (W - gap - 6, 72), 40, cor=CREME, anchor="rs")
     ok = 0
     for i, (asin, it) in enumerate(itens):
         x = gap + (i % cols) * (lado + gap)
-        y = gap + (i // cols) * (lado + gap)
-        d.rounded_rectangle([x, y, x + lado, y + lado], radius=24, fill=(255, 255, 255))
+        y = topo + gap + (i // cols) * (lado + gap)
+        d.rounded_rectangle([x, y, x + lado, y + lado], radius=26, fill=(255, 255, 255))
         try:
-            r = requests.get(foto_url(it), timeout=15)
-            img = Image.open(BytesIO(r.content)).convert("RGB")
-            img.thumbnail((lado - 60, lado - 60))
-            tela.paste(img, (x + (lado - img.width) // 2, y + (lado - img.height) // 2))
+            img = foto_produto(it, (lado - 70, lado - 90))
+            tela.paste(img, (x + (lado - img.width) // 2, y + 20 + (lado - 40 - img.height) // 2))
             ok += 1
         except Exception as e:
             log(f"Foto {asin} falhou na colagem: {e}")
-        # número no canto e selo de desconto
-        d.ellipse([x + 10, y + 10, x + 70, y + 70], fill=(229, 57, 53))
-        d.text((x + 40, y + 40), str(i + 1), fill="white", font=fonte, anchor="mm")
-        selo = f"-{it['pc']}%"
-        d.rounded_rectangle([x + lado - 135, y + lado - 62, x + lado - 10, y + lado - 10],
-                            radius=14, fill=(46, 125, 50))
-        d.text((x + lado - 72, y + lado - 36), selo, fill="white", font=fonte_p, anchor="mm")
+        d.ellipse([x + 12, y + 12, x + 64, y + 64], fill=CAFE)
+        d.text((x + 38, y + 38), str(i + 1), fill=CREME, font=fonte(30), anchor="mm")
+        tag = etiqueta_img(f"-{it['pc']}%", 62)
+        tela.paste(tag, (x + lado - tag.width - 8, y + lado - tag.height - 8), tag)
     if not ok:
         return None
+    d.text((gap + 6, H - rodape // 2), f"Caçada de {datetime.now(TZ).strftime('%d/%m às %H:%M')} · preços podem mudar",
+           fill=MARROM, font=fonte(22, 500), anchor="lm")
     caminho = os.path.abspath("wa_colagem.jpg")
-    tela.save(caminho, "JPEG", quality=85)
-    # miniatura leve: vai como "prévia" de uma mensagem de texto (o canal recusa imagem pura)
+    tela.save(caminho, "JPEG", quality=88)
     mini = tela.copy()
     mini.thumbnail((480, 480))
     mini.save(os.path.abspath("wa_mini.jpg"), "JPEG", quality=70)
+    return caminho
+
+
+def quebrar(texto, f, largura, linhas=2):
+    pal, out, atual = texto.split(), [], ""
+    for p in pal:
+        tent = (atual + " " + p).strip()
+        if f.getlength(tent) <= largura:
+            atual = tent
+        else:
+            out.append(atual)
+            atual = p
+            if len(out) == linhas:
+                break
+    if len(out) < linhas and atual:
+        out.append(atual)
+    out = [l for l in out[:linhas] if l] or [texto[:40]]
+    if len(" ".join(out)) < len(texto):
+        while out[-1] and f.getlength(out[-1] + "…") > largura:
+            out[-1] = out[-1].rsplit(" ", 1)[0] if " " in out[-1] else out[-1][:-1]
+        out[-1] += "…"
+    return out
+
+
+def montar_card(asin, it):
+    """Post de uma oferta só (1080x1080) no visual Temporada de caça. Devolve o caminho do JPG ou None."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    W = 1080
+    tela = Image.new("RGB", (W, W), CREME)
+    d = ImageDraw.Draw(tela)
+    pilula(d, 56, 50, 22)
+    marca_texto(d, (W - 56, 96), 36, anchor="rs")
+    logo = logo_img(62)
+    fm = fonte(36)
+    larg = fm.getlength("caça-descontos")
+    tela.paste(logo, (int(W - 56 - larg - 76), 50), logo)
+    caixa = [56, 150, W - 56, 690]
+    d.rounded_rectangle(caixa, radius=30, fill=(255, 255, 255))
+    try:
+        img = foto_produto(it, (caixa[2] - caixa[0] - 120, caixa[3] - caixa[1] - 80))
+        tela.paste(img, ((W - img.width) // 2, caixa[1] + (caixa[3] - caixa[1] - img.height) // 2))
+    except Exception as e:
+        log(f"Foto {asin} falhou no card: {e}")
+        return None
+    tag = etiqueta_img(f"-{it['pc']}%", 118, rot=10)
+    tela.paste(tag, (caixa[2] - tag.width - 10, caixa[1] - 30), tag)
+    ft = fonte(38, 700)
+    y = 740
+    for l in quebrar(it["t"], ft, W - 112):
+        d.text((56, y), l, fill=CAFE, font=ft, anchor="ls")
+        y += 48
+    fp = fonte(92)
+    preco = brl(it["p"])
+    d.text((52, y + 82), preco, fill=TOMATE, font=fp, anchor="ls")
+    if it.get("d"):
+        fd = fonte(34, 500)
+        x0 = 52 + fp.getlength(preco) + 24
+        de = brl(it["d"])
+        d.text((x0, y + 82), de, fill=MARROM, font=fd, anchor="ls")
+        d.line([x0, y + 70, x0 + fd.getlength(de), y + 70], fill=MARROM, width=3)
+    chips = (["Menor preço em 30 dias"] if it.get("min30") else []) + ["Amazon"]
+    x, yc = 56, y + 112
+    fc = fonte(22, 700)
+    for n, c in enumerate(chips):
+        w = int(fc.getlength(c) + 40)
+        if n == 0 and it.get("min30"):
+            d.rounded_rectangle([x, yc, x + w, yc + 46], radius=23, fill=CAFE)
+            d.text((x + w // 2, yc + 23), c, fill=CREME, font=fc, anchor="mm")
+        else:
+            d.rounded_rectangle([x, yc, x + w, yc + 46], radius=23, outline=CAFE, width=3)
+            d.text((x + w // 2, yc + 23), c, fill=CAFE, font=fc, anchor="mm")
+        x += w + 14
+    caminho = os.path.abspath("wa_card.jpg")
+    tela.save(caminho, "JPEG", quality=90)
     return caminho
 
 
@@ -568,7 +751,15 @@ def wa_destaque(asin, it):
     if not (WHAPI_TOKEN and WHAPI_PARA):
         return False
     txt = texto_destaque(asin, it)
-    ok = it.get("img") and whapi("image", {"to": WHAPI_PARA, "media": foto_url(it), "caption": txt})
+    ok = False
+    card = montar_card(asin, it) if FOTOS and it.get("img") else None
+    if card:  # arte da marca (Temporada de caça) com a foto, o preço e o selo de desconto
+        with open(card, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        ok = whapi("image", {"to": WHAPI_PARA, "caption": txt,
+                             "media": f"data:image/jpeg;name=oferta.jpg;base64,{b64}"})
+    if not ok:
+        ok = it.get("img") and whapi("image", {"to": WHAPI_PARA, "media": foto_url(it), "caption": txt})
     if not ok:
         ok = whapi("text", {"to": WHAPI_PARA, "body": txt, "typing_time": 0})
     log(f"WhatsApp: destaque {asin} ok={ok}")
@@ -613,6 +804,13 @@ def teste_destaque(chat):
                  f"\n\n⚠️ <i>Teste: nenhuma das {len(cand)} melhores foi confirmada como mais barata "
                  f"(esta ficou como “{v}”), então não iria para o canal.</i>")
         legenda = "🧪 <b>TESTE — assim fica o destaque no WhatsApp:</b>\n\n" + wa_para_html(texto_destaque(a, it)) + aviso
+        card = montar_card(a, it) if it.get("img") else None
+        if card and visivel(legenda) <= 1024:
+            with open(card, "rb") as f:
+                r = requests.post(TG + "/sendPhoto", data={"chat_id": chat, "caption": legenda, "parse_mode": "HTML"},
+                                  files={"photo": f}, timeout=60)
+            if r.ok:
+                return
         if it.get("img") and visivel(legenda) <= 1024:
             r = requests.post(TG + "/sendPhoto", data={"chat_id": chat, "photo": foto_url(it),
                                                        "caption": legenda, "parse_mode": "HTML"}, timeout=60)
@@ -635,7 +833,7 @@ def wa_post(top, rotulo="", extra=0, ultimo=True, titulo=None, sub=""):
         titulo = f"🖤 *BLACK FRIDAY • {len(top)} OFERTAS*"
     elif not titulo and fase == "esquenta" and not sub:
         sub = f"⏳ Faltam {faltam} dia{'s' if faltam > 1 else ''} para a Black Friday"
-    cab = (titulo or f"🔥 *CAÇA-DESCONTOS • {len(top)} OFERTAS*") + rotulo + (f"\n_{sub}_" if sub else "")
+    cab = (titulo or f"🟢 *TEMPORADA DE CAÇA: ABERTA*\n🎯 *{len(top)} ofertas caçadas agora*") + rotulo + (f"\n_{sub}_" if sub else "")
     texto = (f"{cab}\n"
              f"━━━━━━━━━━━━━━\n\n{corpo}\n\n━━━━━━━━━━━━━━")
     if extra > 0:
